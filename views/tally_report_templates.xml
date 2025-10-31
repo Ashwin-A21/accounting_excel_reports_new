@@ -1,0 +1,271 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <template id="tally_report_style_template">
+        <style type="text/css">
+            body { font-family: Arial, sans-serif; }
+            .o_tally_report_page { padding: 20px; }
+            .o_tally_report_page h2 {
+                text-align: center;
+                font-size: 18px;
+                font-weight: bold;
+                margin-bottom: 5px;
+            }
+            .o_tally_report_page .company_name {
+                text-align: center;
+                font-size: 16px;
+                font-weight: bold;
+                margin-bottom: 3px;
+            }
+            .o_tally_report_page .report_date {
+                text-align: center;
+                font-size: 12px;
+                margin-bottom: 20px;
+            }
+            .o_tally_report_page table {
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 10px;
+            }
+            .o_tally_report_page th {
+                text-align: left;
+                padding: 8px 5px;
+                border-top: 1px solid #000;
+                border-bottom: 1px solid #000;
+                background-color: #f0f0f0;
+                font-weight: bold;
+            }
+            .o_tally_report_page td {
+                padding: 4px 5px;
+                vertical-align: top;
+            }
+            .o_tally_report_page .tr_group {
+                font-weight: bold;
+                background-color: #fafafa;
+            }
+            .o_tally_report_page .tr_total {
+                font-weight: bold;
+                border-top: 2px solid #000;
+                border-bottom: 3px double #000;
+            }
+            .o_tally_report_page .tr_net_result {
+                font-weight: bold;
+                border-top: 2px solid #000;
+                border-bottom: 3px double #000;
+            }
+            .o_tally_report_page .tr_net_result_profit {
+                background-color: #C6EFCE;
+                color: #006100;
+            }
+            .o_tally_report_page .tr_net_result_loss {
+                background-color: #FFC7CE;
+                color: #9C0006;
+            }
+            .o_tally_report_page .text-right {
+                text-align: right;
+            }
+            .o_tally_report_page .text-center {
+                text-align: center;
+            }
+            
+            /* Horizontal Balance Sheet Styles */
+            .o_horizontal_bs_page table {
+                width: 49%;
+                display: inline-table;
+                vertical-align: top;
+            }
+            .o_horizontal_bs_page .left_table {
+                margin-right: 2%;
+            }
+            .o_horizontal_bs_page .table_container {
+                display: flex;
+                justify-content: space-between;
+            }
+        </style>
+    </template>
+
+    <template id="report_tally_trial_balance_template">
+        <t t-call="web.html_container">
+            <t t-call="web.internal_layout">
+                <t t-call="accounting_excel_reports.tally_report_style_template"/>
+                <div class="page o_tally_report_page">
+                    <div class="company_name" t-esc="docs.company_id.name"/>
+                    <h2>Trial Balance</h2>
+                    <div class="report_date">
+                        As on <span t-esc="docs.end_date" t-options="{'widget': 'date', 'format': 'dd-MMM-yyyy'}"/>
+                    </div>
+                    
+                    <table>
+                        <thead>
+                            <tr>
+                                <th style="width: 60%;">Particulars</th>
+                                <th style="width: 20%; text-align: right;">Debit</th>
+                                <th style="width: 20%; text-align: right;">Credit</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr t-foreach="docs.line_ids" t-as="line" 
+                                t-att-class="'tr_group' if line.is_group else 'tr_total' if line.is_total else ''">
+                                
+                                <td t-esc="line.name"/>
+                                
+                                <td class="text-right">
+                                    <span t-if="line.debit" t-esc="line.debit" 
+                                          t-options="{'widget': 'monetary', 'display_currency': docs.company_id.currency_id}"/>
+                                </td>
+                                
+                                <td class="text-right">
+                                    <span t-if="line.credit" t-esc="line.credit" 
+                                          t-options="{'widget': 'monetary', 'display_currency': docs.company_id.currency_id}"/>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </t>
+        </t>
+    </template>
+    
+    <template id="report_tally_profit_loss_template">
+        <t t-call="web.html_container">
+            <t t-call="web.internal_layout">
+                <t t-call="accounting_excel_reports.tally_report_style_template"/>
+                <div class="page o_tally_report_page">
+                    <div class="company_name" t-esc="docs.company_id.name"/>
+                    <h2>Profit &amp; Loss Account</h2>
+                    <div class="report_date">
+                        From <span t-esc="docs.start_date" t-options="{'widget': 'date', 'format': 'dd-MMM-yyyy'}"/>
+                        To <span t-esc="docs.end_date" t-options="{'widget': 'date', 'format': 'dd-MMM-yyyy'}"/>
+                    </div>
+                    
+                    <table>
+                        <thead>
+                            <tr>
+                                <th style="width: 70%;">Particulars</th>
+                                <th style="width: 30%; text-align: right;">Amount</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <t t-foreach="docs.line_ids" t-as="line">
+                                <t t-set="tr_class" t-value="'tr_group' if line.is_group else ''"/>
+                                <t t-if="line.is_net_result">
+                                    <t t-set="tr_class" t-value="'tr_net_result'"/>
+                                    <t t-if="'Profit' in line.name">
+                                         <t t-set="tr_class" t-value="tr_class + ' tr_net_result_profit'"/>
+                                    </t>
+                                    <t t-if="'Loss' in line.name">
+                                         <t t-set="tr_class" t-value="tr_class + ' tr_net_result_loss'"/>
+                                    </t>
+                                </t>
+                            
+                                <tr t-att-class="tr_class">
+                                    <td t-esc="line.name"/>
+                                    
+                                    <td class="text-right">
+                                        <span t-if="line.amount or line.is_group or line.is_net_result" 
+                                              t-esc="abs(line.amount)" 
+                                              t-options="{'widget': 'monetary', 'display_currency': docs.company_id.currency_id}"/>
+                                    </td>
+                                </tr>
+                            </t>
+                        </tbody>
+                    </table>
+                </div>
+            </t>
+        </t>
+    </template>
+    
+    <template id="report_tally_balance_sheet_template">
+        <t t-call="web.html_container">
+            <t t-call="web.internal_layout">
+                <t t-call="accounting_excel_reports.tally_report_style_template"/>
+                <div class="page o_tally_report_page">
+                    <div class="company_name" t-esc="docs.company_id.name"/>
+                    <h2>Balance Sheet</h2>
+                    <div class="report_date">
+                        As on <span t-esc="docs.end_date" t-options="{'widget': 'date', 'format': 'dd-MMM-yyyy'}"/>
+                    </div>
+                    
+                    <table>
+                        <thead>
+                            <tr>
+                                <th style="width: 70%;">Particulars</th>
+                                <th style="width: 30%; text-align: right;">Amount</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr t-foreach="docs.line_ids" t-as="line" 
+                                t-att-class="'tr_group' if line.is_group else 'tr_total' if line.is_total else ''">
+                                
+                                <td t-esc="line.name"/>
+                                
+                                <td class="text-right">
+                                    <span t-if="abs(line.amount) > 0.01 or line.is_group or line.is_total" 
+                                          t-esc="line.amount if line.amount >= 0 else -line.amount" 
+                                          t-options="{'widget': 'monetary', 'display_currency': docs.company_id.currency_id}"/>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </t>
+        </t>
+    </template>
+    
+    <template id="report_tally_balance_sheet_horizontal_template">
+        <t t-call="web.html_container">
+            <t t-call="web.internal_layout">
+                <t t-call="accounting_excel_reports.tally_report_style_template"/>
+                <div class="page o_tally_report_page o_horizontal_bs_page">
+                    <div class="company_name" t-esc="docs.company_id.name"/>
+                    <h2>Balance Sheet</h2>
+                    <div class="report_date">
+                        As on <span t-esc="docs.end_date" t-options="{'widget': 'date', 'format': 'dd-MMM-yyyy'}"/>
+                    </div>
+                    
+                    <div class="table_container">
+                        <table class="left_table">
+                            <thead>
+                                <tr>
+                                    <th style="width: 70%;">Liabilities</th>
+                                    <th style="width: 30%; text-align: right;">Amount</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr t-foreach="docs.liability_line_ids" t-as="line"
+                                    t-att-class="'tr_group' if line.is_group else 'tr_total' if line.is_total else ''">
+                                    <td t-esc="line.name"/>
+                                    <td class="text-right">
+                                        <span t-if="line.amount or line.is_group or line.is_total" 
+                                              t-esc="abs(line.amount)" 
+                                              t-options="{'widget': 'monetary', 'display_currency': docs.company_id.currency_id}"/>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th style="width: 70%;">Assets</th>
+                                    <th style="width: 30%; text-align: right;">Amount</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr t-foreach="docs.asset_line_ids" t-as="line"
+                                    t-att-class="'tr_group' if line.is_group else 'tr_total' if line.is_total else ''">
+                                    <td t-esc="line.name"/>
+                                    <td class="text-right">
+                                        <span t-if="line.amount or line.is_group or line.is_total" 
+                                              t-esc="abs(line.amount)" 
+                                              t-options="{'widget': 'monetary', 'display_currency': docs.company_id.currency_id}"/>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </t>
+        </t>
+    </template>
+    
+</odoo>

@@ -1,0 +1,7 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_trial_balance_wizard,access.trial.balance.wizard,model_trial_balance_wizard,account.group_account_user,1,1,1,1
+access_balance_sheet_wizard,access.balance.sheet.wizard,model_balance_sheet_wizard,account.group_account_user,1,1,1,1
+access_profit_loss_wizard,access.profit.loss.wizard,model_profit_loss_wizard,account.group_account_user,1,1,1,1
+access_tally_trial_balance_line,access.tally.trial.balance.line,model_tally_trial_balance_line,account.group_account_user,1,1,1,1
+access_tally_profit_loss_line,access.tally.profit.loss.line,model_tally_profit_loss_line,account.group_account_user,1,1,1,1
+access_tally_balance_sheet_line,access.tally.balance.sheet.line,model_tally_balance_sheet_line,account.group_account_user,1,1,1,1

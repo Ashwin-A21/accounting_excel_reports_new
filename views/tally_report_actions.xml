@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="action_report_tally_trial_balance" model="ir.actions.report">
+        <field name="name">Trial Balance (Tally View)</field>
+        <field name="model">trial.balance.wizard</field>
+        <field name="report_type">qweb-html</field>
+        <field name="report_name">accounting_excel_reports.report_tally_trial_balance_template</field>
+        <field name="report_file">accounting_excel_reports.report_tally_trial_balance_template</field>
+        <field name="print_report_name">(object.file_name or 'Tally Trial Balance')</field>
+    </record>
+
+    <record id="action_report_tally_profit_loss" model="ir.actions.report">
+        <field name="name">Profit &amp; Loss (Tally View)</field>
+        <field name="model">profit.loss.wizard</field>
+        <field name="report_type">qweb-html</field>
+        <field name="report_name">accounting_excel_reports.report_tally_profit_loss_template</field>
+        <field name="report_file">accounting_excel_reports.report_tally_profit_loss_template</field>
+        <field name="print_report_name">(object.file_name or 'Tally Profit &amp; Loss')</field>
+    </record>
+
+    <record id="action_report_tally_balance_sheet" model="ir.actions.report">
+        <field name="name">Balance Sheet (Tally View)</field>
+        <field name="model">balance.sheet.wizard</field>
+        <field name="report_type">qweb-html</field>
+        <field name="report_name">accounting_excel_reports.report_tally_balance_sheet_template</field>
+        <field name="report_file">accounting_excel_reports.report_tally_balance_sheet_template</field>
+        <field name="print_report_name">(object.file_name or 'Tally Balance Sheet')</field>
+    </record>
+    
+    <record id="action_report_tally_balance_sheet_horizontal" model="ir.actions.report">
+        <field name="name">Balance Sheet (Horizontal Tally View)</field>
+        <field name="model">balance.sheet.wizard</field>
+        <field name="report_type">qweb-html</field>
+        <field name="report_name">accounting_excel_reports.report_tally_balance_sheet_horizontal_template</field>
+        <field name="report_file">accounting_excel_reports.report_tally_balance_sheet_horizontal_template</field>
+        <field name="print_report_name">(object.file_name or 'Tally Balance Sheet Horizontal')</field>
+    </record>
+</odoo>

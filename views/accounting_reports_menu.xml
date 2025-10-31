@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="action_trial_balance_wizard" model="ir.actions.act_window">
+        <field name="name">Trial Balance</field>
+        <field name="res_model">trial.balance.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+    <record id="action_balance_sheet_wizard" model="ir.actions.act_window">
+        <field name="name">Balance Sheet</field>
+        <field name="res_model">balance.sheet.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+    <record id="action_profit_loss_wizard" model="ir.actions.act_window">
+        <field name="name">Profit &amp; Loss</field>
+        <field name="res_model">profit.loss.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+    <menuitem id="menu_accounting_excel_reports"
+              name="Excel Reports"
+              parent="account.menu_finance_reports"
+              sequence="100"/>
+
+    <menuitem id="menu_trial_balance_report"
+              name="Trial Balance"
+              parent="menu_accounting_excel_reports"
+              action="action_trial_balance_wizard"
+              sequence="1"/>
+
+    <menuitem id="menu_balance_sheet_report"
+              name="Balance Sheet"
+              parent="menu_accounting_excel_reports"
+              action="action_balance_sheet_wizard"
+              sequence="2"/>
+
+    <menuitem id="menu_profit_loss_report"
+              name="Profit &amp; Loss"
+              parent="menu_accounting_excel_reports"
+              action="action_profit_loss_wizard"
+              sequence="3"/>
+</odoo>

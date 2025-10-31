@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <record id="view_tally_trial_balance_line_tree" model="ir.ui.view">
+        <field name="name">tally.trial.balance.line.tree</field>
+        <field name="model">tally.trial.balance.line</field>
+        <field name="arch" type="xml">
+            <tree decoration-bf="is_group or is_total" decoration-muted="is_group" default_order="sequence" create="false" edit="false" delete="false">
+                <field name="sequence" optional="hide"/>
+                <field name="level" optional="hide"/>
+                <field name="is_group" optional="hide"/>
+                <field name="is_total" optional="hide"/>
+                <field name="name" string="Particulars" class="o_report_line_indent"/>
+                <field name="debit" sum="Total Debit"/>
+                <field name="credit" sum="Total Credit"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="action_tally_trial_balance_lines" model="ir.actions.act_window">
+        <field name="name">Trial Balance (Tally Format)</field>
+        <field name="res_model">tally.trial.balance.line</field>
+        <field name="view_mode">tree</field>
+        <field name="view_id" ref="view_tally_trial_balance_line_tree"/>
+        <field name="target">current</field>
+    </record>
+
+    <record id="view_tally_profit_loss_line_tree" model="ir.ui.view">
+        <field name="name">tally.profit.loss.line.tree</field>
+        <field name="model">tally.profit.loss.line</field>
+        <field name="arch" type="xml">
+            <tree decoration-bf="is_group or is_total or is_net_result" decoration-muted="is_group" decoration-success="is_net_result and amount &gt;= 0" decoration-danger="is_net_result and amount &lt; 0" default_order="sequence" create="false" edit="false" delete="false">
+                <field name="sequence" optional="hide"/>
+                <field name="level" optional="hide"/>
+                <field name="is_group" optional="hide"/>
+                <field name="is_total" optional="hide"/>
+                <field name="is_net_result" optional="hide"/>
+                <field name="name" string="Particulars" class="o_report_line_indent"/>
+                <field name="code" string="Code" optional="hide"/> <field name="amount" string="Amount"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="action_tally_profit_loss_lines" model="ir.actions.act_window">
+        <field name="name">Profit &amp; Loss (Tally Format)</field>
+        <field name="res_model">tally.profit.loss.line</field>
+        <field name="view_mode">tree</field>
+        <field name="view_id" ref="view_tally_profit_loss_line_tree"/>
+        <field name="target">current</field>
+    </record>
+
+    <record id="view_tally_balance_sheet_line_tree" model="ir.ui.view">
+        <field name="name">tally.balance.sheet.line.tree</field>
+        <field name="model">tally.balance.sheet.line</field>
+        <field name="arch" type="xml">
+             <tree decoration-bf="is_group or is_total" decoration-muted="is_group" default_order="sequence" create="false" edit="false" delete="false">
+                <field name="sequence" optional="hide"/>
+                <field name="level" optional="hide"/>
+                <field name="is_group" optional="hide"/>
+                <field name="is_total" optional="hide"/>
+                <field name="name" string="Particulars" class="o_report_line_indent"/>
+                 <field name="code" string="Code" optional="hide"/> <field name="amount" string="Amount"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="action_tally_balance_sheet_lines" model="ir.actions.act_window">
+        <field name="name">Balance Sheet (Tally Format)</field>
+        <field name="res_model">tally.balance.sheet.line</field>
+        <field name="view_mode">tree</field>
+        <field name="view_id" ref="view_tally_balance_sheet_line_tree"/>
+        <field name="target">current</field>
+    </record>
+
+</odoo>

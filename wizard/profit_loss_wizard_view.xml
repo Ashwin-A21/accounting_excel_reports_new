@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_profit_loss_wizard_form" model="ir.ui.view">
+        <field name="name">profit.loss.wizard.form</field>
+        <field name="model">profit.loss.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Profit &amp; Loss Report">
+                <group>
+                    <group>
+                        <field name="start_date"/>
+                        <field name="end_date"/>
+                    </group>
+                    <group>
+                        <field name="company_id" groups="base.group_multi_company"/>
+                    </group>
+                </group>
+                <footer>
+                    <button name="action_view_report" string="View Report" type="object" class="btn-secondary"/>
+                    <button name="action_download_excel" string="Download Excel" type="object" class="btn-primary"/>
+                    <button string="Cancel" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+</odoo>
