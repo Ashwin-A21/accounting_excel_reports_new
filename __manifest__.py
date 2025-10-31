@@ -1,6 +1,6 @@
 {
     'name': 'Accounting Excel Reports',
-    'version': '17.0.1.2.0', # Increment version
+    'version': '17.0.1.3.0', # Incremented version
     'category': 'Accounting',
     'summary': 'Generate Excel and View Tally-style reports for Trial Balance, Balance Sheet, and P&L',
     'description': """
@@ -8,14 +8,17 @@
         - Trial Balance (Tally Format)
         - Balance Sheet (Tally Format)
         - Profit & Loss Account (Tally Format)
-        Uses hard-coded grouping based on account types for compatibility with Invoicing module.
         
-        New in 1.2.0:
-        - Added QWeb HTML views for all three reports for a Tally-style on-screen display.
+        Uses Odoo's core account.move.line calculations for accuracy
+        and Tally-style grouping.
+        
+        New in 1.3.0:
+        - Refactored balance calculation to use account.move.line read_group
+          for accuracy and performance, removing manual source document parsing.
     """,
     'author': 'Concept Solutions ',
     'website': 'https://www.csloman.com',
-    'depends': ['account', 'web'], # Added 'web' for QWeb templates
+    'depends': ['account', 'web'],
     'data': [
         'security/ir.model.access.csv',
         'wizard/trial_balance_wizard_view.xml',
@@ -23,8 +26,8 @@
         'wizard/profit_loss_wizard_view.xml',
         'views/accounting_reports_menu.xml',
         'views/tally_report_views.xml',
-        'views/tally_report_actions.xml', # --- NEW FILE ---
-        'views/tally_report_templates.xml', # --- NEW FILE ---
+        'views/tally_report_actions.xml',
+        'views/tally_report_templates.xml',
     ],
     'installable': True,
     'application': False,

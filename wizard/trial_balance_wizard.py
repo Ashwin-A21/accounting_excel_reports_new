@@ -25,111 +25,35 @@ class TrialBalanceWizard(models.TransientModel):
             if record.start_date > record.end_date:
                 raise UserError('End Date must be greater than Start Date!')
 
-    def _get_account_balances_from_sources(self, date_to, company_id):
+    def _get_account_balances(self, date_to, company_id):
         """
-        Calculate account balances from source documents - TALLY STANDARD
+        Calculate account balances from Odoo's core journal items.
         Returns Debit-Credit format (can be positive or negative):
-        - Positive balance = Debit balance (shown in Debit column)
-        - Negative balance = Credit balance (shown in Credit column)
+        - Positive balance = Debit balance
+        - Negative balance = Credit balance
         """
         balances = defaultdict(float)
-        Account = self.env['account.account']
         
-        # === CUSTOMER INVOICES ===
-        customer_invoices = self.env['account.move'].search([
-            ('move_type', '=', 'out_invoice'),
-            ('state', '=', 'posted'),
-            ('invoice_date', '<=', date_to),
-            ('company_id', '=', company_id.id)
-        ])
-        
-        for invoice in customer_invoices:
-            for line in invoice.line_ids:
-                # Debit - Credit (standard accounting)
-                balances[line.account_id.id] += line.debit - line.credit
-
-        # === CUSTOMER CREDIT NOTES ===
-        customer_refunds = self.env['account.move'].search([
-            ('move_type', '=', 'out_refund'),
-            ('state', '=', 'posted'),
-            ('invoice_date', '<=', date_to),
-            ('company_id', '=', company_id.id)
-        ])
-        
-        for refund in customer_refunds:
-            for line in refund.line_ids:
-                balances[line.account_id.id] += line.debit - line.credit
-
-        # === VENDOR BILLS ===
-        vendor_bills = self.env['account.move'].search([
-            ('move_type', '=', 'in_invoice'),
-            ('state', '=', 'posted'),
-            ('invoice_date', '<=', date_to),
-            ('company_id', '=', company_id.id)
-        ])
-        
-        for bill in vendor_bills:
-            for line in bill.line_ids:
-                balances[line.account_id.id] += line.debit - line.credit
-
-        # === VENDOR CREDIT NOTES ===
-        vendor_refunds = self.env['account.move'].search([
-            ('move_type', '=', 'in_refund'),
-            ('state', '=', 'posted'),
-            ('invoice_date', '<=', date_to),
-            ('company_id', '=', company_id.id)
-        ])
-        
-        for refund in vendor_refunds:
-            for line in refund.line_ids:
-                balances[line.account_id.id] += line.debit - line.credit
-
-        # === PAYMENTS ===
-        payments = self.env['account.payment'].search([
-            ('state', '=', 'posted'),
-            ('date', '<=', date_to),
-            ('company_id', '=', company_id.id)
-        ])
-        
-        for payment in payments:
-            for line in payment.move_id.line_ids:
-                balances[line.account_id.id] += line.debit - line.credit
-
-        # === BANK STATEMENTS ===
-        bank_statements = self.env['account.bank.statement.line'].search([
+        # Domain for all posted journal items up to the end date
+        domain = [
+            ('move_id.state', '=', 'posted'),
             ('date', '<=', date_to),
             ('company_id', '=', company_id.id),
-            ('is_reconciled', '=', True)
-        ])
-        
-        for stmt_line in bank_statements:
-            if stmt_line.move_id and stmt_line.move_id.state == 'posted':
-                for line in stmt_line.move_id.line_ids:
-                    balances[line.account_id.id] += line.debit - line.credit
+            ('account_id.account_type', '!=', 'off_balance') # Exclude off-balance accounts
+        ]
 
-        # === MANUAL JOURNAL ENTRIES ===
-        manual_entries = self.env['account.move'].search([
-            ('move_type', '=', 'entry'),
-            ('state', '=', 'posted'),
-            ('date', '<=', date_to),
-            ('company_id', '=', company_id.id)
-        ])
-        
-        for entry in manual_entries:
-            for line in entry.line_ids:
-                balances[line.account_id.id] += line.debit - line.credit
+        # Use read_group to sum debit and credit by account
+        read_group_result = self.env['account.move.line'].read_group(
+            domain,
+            ['debit', 'credit', 'account_id'],
+            ['account_id']
+        )
 
-        # === OPENING BALANCES (Historical) ===
-        opening_moves = self.env['account.move'].search([
-            ('state', '=', 'posted'),
-            ('date', '<', self.start_date),
-            ('company_id', '=', company_id.id),
-            ('move_type', 'not in', ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'])
-        ])
-        
-        for move in opening_moves:
-            for line in move.line_ids:
-                balances[line.account_id.id] += line.debit - line.credit
+        # Calculate the balance (debit - credit) for each account
+        for res in read_group_result:
+            if res['account_id']:
+                account_id = res['account_id'][0]
+                balances[account_id] += (res['debit'] or 0.0) - (res['credit'] or 0.0)
 
         return balances
 
@@ -140,7 +64,13 @@ class TrialBalanceWizard(models.TransientModel):
         lines = []
         sequence = 0
 
-        account_balances = self._get_account_balances_from_sources(self.end_date, self.company_id)
+        # Use the new core calculation method
+        account_balances = self._get_account_balances(self.end_date, self.company_id)
+        
+        # We only need to process accounts that have a balance
+        if not account_balances:
+            return
+
         all_accounts = self.env['account.account'].browse(account_balances.keys())
 
         # Tally Standard Grouping - Proper Order
@@ -149,13 +79,13 @@ class TrialBalanceWizard(models.TransientModel):
             'Current Liabilities': ['liability_payable', 'liability_credit_card', 'liability_current'],
             'Loans (Liability)': ['liability_non_current'],
             'Fixed Assets': ['asset_fixed', 'asset_non_current'],
-            'Investments': [],
+            'Investments': [], # Add 'asset_investment' if you use it
             'Current Assets': ['asset_receivable', 'asset_cash', 'asset_current', 'asset_prepayment'],
-            'Loans & Advances (Asset)': [],
-            'Suspense A/c': [],
+            'Loans & Advances (Asset)': [], # Placeholder for Tally group
+            'Suspense A/c': [], # Placeholder for Tally group
             'Sales Accounts': ['income'],
             'Purchase Accounts': ['expense_direct_cost'],
-            'Direct Incomes': [],
+            'Direct Incomes': [], # Placeholder for Tally group
             'Direct Expenses': ['expense'],
             'Indirect Incomes': ['income_other'],
             'Indirect Expenses': ['expense_depreciation'],
@@ -167,24 +97,22 @@ class TrialBalanceWizard(models.TransientModel):
                 type_to_group_map[acc_type] = group_name
 
         accounts_by_group = defaultdict(lambda: self.env['account.account'])
+        
+        # Assign accounts to groups
         for acc in all_accounts:
-            group_name = type_to_group_map.get(
-                acc.account_type, 
-                'Sundry Debtors' if acc.account_type.startswith('asset') else 'Sundry Creditors'
-            )
+            # Use 'Miscellaneous' as a fallback group if no type is mapped
+            group_name = type_to_group_map.get(acc.account_type, 'Miscellaneous')
             accounts_by_group[group_name] |= acc
 
         # Tally Standard Order
         group_order = [
             'Capital Account',
-            'Current Liabilities',
             'Loans (Liability)',
-            'Sundry Creditors',
+            'Current Liabilities',
             'Fixed Assets',
             'Investments',
             'Current Assets',
             'Loans & Advances (Asset)',
-            'Sundry Debtors',
             'Suspense A/c',
             'Sales Accounts',
             'Purchase Accounts',
@@ -192,6 +120,7 @@ class TrialBalanceWizard(models.TransientModel):
             'Direct Expenses',
             'Indirect Incomes',
             'Indirect Expenses',
+            'Miscellaneous' # Add fallback group
         ]
 
         grand_total_debit = 0.0
@@ -215,12 +144,11 @@ class TrialBalanceWizard(models.TransientModel):
                 debit = balance if balance > 0 else 0.0
                 credit = abs(balance) if balance < 0 else 0.0
                 
-                sequence += 10
+                # --- CHANGE ---
+                # Don't add sequence here. Just prepare the line data.
                 group_lines.append({
-                    'wizard_id': self.id,
-                    'sequence': sequence,
                     'level': 1,
-                    'name': f"  {account.name}",
+                    'name': f"  {account.name} ({account.code or 'N/A'})",
                     'debit': debit,
                     'credit': credit,
                     'is_group': False,
@@ -230,10 +158,16 @@ class TrialBalanceWizard(models.TransientModel):
                 group_credit_total += credit
 
             if group_lines:
+                # ---
+                # CHANGE: Add the group header line FIRST, then the accounts.
+                # This ensures a strictly increasing sequence.
+                # ---
+
+                # 1. Add the group header line
                 sequence += 10
                 lines.append({
                     'wizard_id': self.id,
-                    'sequence': sequence - (len(group_lines) * 10) - 5,
+                    'sequence': sequence,
                     'level': 0,
                     'name': group_name,
                     'debit': group_debit_total,
@@ -241,7 +175,17 @@ class TrialBalanceWizard(models.TransientModel):
                     'is_group': True,
                     'is_total': False,
                 })
-                lines.extend(group_lines)
+                
+                # 2. Add the account lines for this group
+                for line_vals in group_lines:
+                    sequence += 10 # Increment sequence for each account
+                    line_vals.update({
+                        'wizard_id': self.id,
+                        'sequence': sequence
+                    })
+                    lines.append(line_vals)
+
+                # 3. Update grand totals
                 grand_total_debit += group_debit_total
                 grand_total_credit += group_credit_total
 

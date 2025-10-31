@@ -24,109 +24,71 @@ class ProfitLossWizard(models.TransientModel):
             if record.start_date > record.end_date:
                 raise UserError('End Date must be greater than Start Date!')
 
-    def _get_period_balances_from_sources(self, date_from, date_to, company_id):
+    def _get_period_balances(self, date_from, date_to, company_id):
         """
-        Calculate P&L from source documents - TALLY STANDARD
+        Calculate P&L from core journal items - TALLY STANDARD
         Returns balances as NATURAL AMOUNTS (all positive):
-        - Income accounts: Positive values (revenue earned)
-        - Expense accounts: Positive values (costs incurred)
+        - Income accounts: Positive (Credit balance)
+        - Expense accounts: Positive (Debit balance)
         """
         balances = defaultdict(float)
-        Account = self.env['account.account']
         
-        # === INCOME SIDE (CREDIT SIDE IN TALLY) ===
+        # Define P&L account types
+        pl_account_types = [
+            'income', 'income_other', 
+            'expense_direct_cost', 'expense', 'expense_depreciation'
+        ]
         
-        # Customer Invoices - Revenue
-        customer_invoices = self.env['account.move'].search([
-            ('move_type', '=', 'out_invoice'),
-            ('state', '=', 'posted'),
-            ('invoice_date', '>=', date_from),
-            ('invoice_date', '<=', date_to),
+        # Find all relevant accounts
+        accounts = self.env['account.account'].search([
+            ('account_type', 'in', pl_account_types),
             ('company_id', '=', company_id.id)
         ])
-        
-        for invoice in customer_invoices:
-            for line in invoice.invoice_line_ids:
-                if line.account_id and line.account_id.account_type in ['income', 'income_other']:
-                    # Store as POSITIVE (natural amount)
-                    balances[line.account_id.id] += abs(line.price_subtotal)
+        if not accounts:
+            return balances
 
-        # Customer Credit Notes - Reduce Revenue
-        customer_refunds = self.env['account.move'].search([
-            ('move_type', '=', 'out_refund'),
-            ('state', '=', 'posted'),
-            ('invoice_date', '>=', date_from),
-            ('invoice_date', '<=', date_to),
-            ('company_id', '=', company_id.id)
-        ])
+        # Create a map of account_id to its type
+        account_type_map = {acc.id: acc.account_type for acc in accounts}
         
-        for refund in customer_refunds:
-            for line in refund.invoice_line_ids:
-                if line.account_id and line.account_id.account_type in ['income', 'income_other']:
-                    # Reduce revenue (still positive balance)
-                    balances[line.account_id.id] -= abs(line.price_subtotal)
-
-        # === EXPENSE SIDE (DEBIT SIDE IN TALLY) ===
-        
-        # Vendor Bills - Expenses
-        vendor_bills = self.env['account.move'].search([
-            ('move_type', '=', 'in_invoice'),
-            ('state', '=', 'posted'),
-            ('invoice_date', '>=', date_from),
-            ('invoice_date', '<=', date_to),
-            ('company_id', '=', company_id.id)
-        ])
-        
-        for bill in vendor_bills:
-            for line in bill.invoice_line_ids:
-                if line.account_id and line.account_id.account_type in [
-                    'expense_direct_cost', 'expense', 'expense_depreciation'
-                ]:
-                    # Store as POSITIVE (natural amount)
-                    balances[line.account_id.id] += abs(line.price_subtotal)
-
-        # Vendor Credit Notes - Reduce Expenses
-        vendor_refunds = self.env['account.move'].search([
-            ('move_type', '=', 'in_refund'),
-            ('state', '=', 'posted'),
-            ('invoice_date', '>=', date_from),
-            ('invoice_date', '<=', date_to),
-            ('company_id', '=', company_id.id)
-        ])
-        
-        for refund in vendor_refunds:
-            for line in refund.invoice_line_ids:
-                if line.account_id and line.account_id.account_type in [
-                    'expense_direct_cost', 'expense', 'expense_depreciation'
-                ]:
-                    # Reduce expense (still positive balance)
-                    balances[line.account_id.id] -= abs(line.price_subtotal)
-
-        # === MANUAL JOURNAL ENTRIES (for adjustments) ===
-        manual_entries = self.env['account.move'].search([
-            ('move_type', '=', 'entry'),
-            ('state', '=', 'posted'),
+        # Domain for all posted journal items *within the period*
+        domain = [
+            ('move_id.state', '=', 'posted'),
             ('date', '>=', date_from),
             ('date', '<=', date_to),
-            ('company_id', '=', company_id.id)
-        ])
+            ('company_id', '=', company_id.id),
+            ('account_id', 'in', accounts.ids)
+        ]
+
+        # Use read_group to sum debit and credit by account
+        read_group_result = self.env['account.move.line'].read_group(
+            domain,
+            ['debit', 'credit', 'account_id'],
+            ['account_id']
+        )
         
-        for entry in manual_entries:
-            for line in entry.line_ids:
-                if line.account_id.account_type in [
-                    'income', 'income_other', 
-                    'expense_direct_cost', 'expense', 'expense_depreciation'
-                ]:
-                    # For journal entries, use the natural convention:
-                    # Income: Credit increases (use credit), Debit decreases (subtract debit)
-                    # Expense: Debit increases (use debit), Credit decreases (subtract credit)
-                    account = line.account_id
-                    if account.account_type in ['income', 'income_other']:
-                        # Income: Credit side
-                        balances[account.id] += line.credit - line.debit
-                    else:
-                        # Expense: Debit side
-                        balances[account.id] += line.debit - line.credit
+        # Income types (natural credit balance)
+        income_types = ('income', 'income_other')
+
+        # Calculate natural balances
+        for res in read_group_result:
+            if not res['account_id']:
+                continue
+                
+            account_id = res['account_id'][0]
+            account_type = account_type_map.get(account_id)
+            
+            if not account_type:
+                continue
+
+            debit = res['debit'] or 0.0
+            credit = res['credit'] or 0.0
+
+            if account_type in income_types:
+                # Income: Natural balance is Credit - Debit
+                balances[account_id] = credit - debit
+            else:
+                # Expense: Natural balance is Debit - Credit
+                balances[account_id] = debit - credit
 
         return balances
 
@@ -138,7 +100,7 @@ class ProfitLossWizard(models.TransientModel):
         sequence = 0
 
         Account = self.env['account.account']
-        period_balances = self._get_period_balances_from_sources(
+        period_balances = self._get_period_balances(
             self.start_date, self.end_date, self.company_id
         )
 
@@ -159,7 +121,7 @@ class ProfitLossWizard(models.TransientModel):
                 
                 account_lines.append({
                     'level': level,
-                    'name': f"{'  ' * level}{account.name}",
+                    'name': f"{'  ' * level}{account.name} ({account.code or 'N/A'})",
                     'code': account.code,
                     'amount': abs(balance),  # Always positive
                     'is_group': False,
@@ -242,6 +204,7 @@ class ProfitLossWizard(models.TransientModel):
             'wizard_id': self.id, 'sequence': sequence, 'level': 0,
             'name': 'Direct Incomes', 'is_group': True, 'amount': 0.0,
         })
+        # Note: No 'direct_income' type by default, add accounts if needed
 
         # Indirect Incomes
         sequence += 10

@@ -27,235 +27,146 @@ class BalanceSheetWizard(models.TransientModel):
             if record.start_date > record.end_date:
                 raise UserError('End Date must be greater than Start Date!')
 
-    def _get_all_closing_balances_from_sources(self, date_to, company_id):
+    def _get_closing_balances(self, date_to, company_id):
         """
-        Get closing balances from source documents - TALLY STANDARD
-        Returns balances as NATURAL AMOUNTS:
+        Get closing balances from core journal items - TALLY STANDARD
+        Returns balances as NATURAL AMOUNTS (always positive):
         - Assets: Positive (Debit balance)
-        - Liabilities: Positive (Credit balance shown as positive)
-        - Capital: Positive (Credit balance shown as positive)
+        - Liabilities: Positive (Credit balance)
+        - Capital: Positive (Credit balance)
         """
         balances = defaultdict(float)
-        Account = self.env['account.account']
         
-        # === CUSTOMER INVOICES ===
-        customer_invoices = self.env['account.move'].search([
-            ('move_type', '=', 'out_invoice'),
-            ('state', '=', 'posted'),
-            ('invoice_date', '<=', date_to),
+        # Define Balance Sheet account types
+        bs_account_types = [
+            'asset_receivable', 'asset_cash', 'asset_current', 'asset_prepayment',
+            'asset_fixed', 'asset_non_current',
+            'liability_payable', 'liability_current', 'liability_non_current', 
+            'liability_credit_card',
+            'equity', 'equity_unaffected'
+        ]
+        
+        # Find all relevant accounts
+        accounts = self.env['account.account'].search([
+            ('account_type', 'in', bs_account_types),
             ('company_id', '=', company_id.id)
         ])
-        
-        for invoice in customer_invoices:
-            # Receivable (Asset - Debit) - Customer owes us
-            for line in invoice.line_ids.filtered(lambda l: l.account_id.account_type == 'asset_receivable'):
-                balances[line.account_id.id] += abs(line.debit - line.credit)
-            
-            # Income (already recorded, not part of Balance Sheet)
-            # Tax accounts
-            for line in invoice.line_ids.filtered(lambda l: l.tax_line_id):
-                # Tax collected is a liability
-                balances[line.account_id.id] += abs(line.credit - line.debit)
+        if not accounts:
+            return balances
 
-        # === CUSTOMER CREDIT NOTES ===
-        customer_refunds = self.env['account.move'].search([
-            ('move_type', '=', 'out_refund'),
-            ('state', '=', 'posted'),
-            ('invoice_date', '<=', date_to),
-            ('company_id', '=', company_id.id)
-        ])
+        # Create a map of account_id to its type
+        account_type_map = {acc.id: acc.account_type for acc in accounts}
         
-        for refund in customer_refunds:
-            for line in refund.line_ids:
-                if line.account_id.account_type in ['asset_receivable', 'asset_cash', 'asset_current']:
-                    # Reduce receivable
-                    balances[line.account_id.id] -= abs(line.credit - line.debit)
-                elif line.account_id.account_type in ['liability_payable', 'liability_current']:
-                    balances[line.account_id.id] -= abs(line.debit - line.credit)
-
-        # === VENDOR BILLS ===
-        vendor_bills = self.env['account.move'].search([
-            ('move_type', '=', 'in_invoice'),
-            ('state', '=', 'posted'),
-            ('invoice_date', '<=', date_to),
-            ('company_id', '=', company_id.id)
-        ])
-        
-        for bill in vendor_bills:
-            # Payable (Liability - Credit) - We owe vendor
-            for line in bill.line_ids.filtered(lambda l: l.account_id.account_type == 'liability_payable'):
-                balances[line.account_id.id] += abs(line.credit - line.debit)
-            
-            # Tax accounts
-            for line in bill.line_ids.filtered(lambda l: l.tax_line_id):
-                # Tax paid is an asset (if recoverable) or reduces liability
-                balances[line.account_id.id] += abs(line.debit - line.credit)
-
-        # === VENDOR CREDIT NOTES ===
-        vendor_refunds = self.env['account.move'].search([
-            ('move_type', '=', 'in_refund'),
-            ('state', '=', 'posted'),
-            ('invoice_date', '<=', date_to),
-            ('company_id', '=', company_id.id)
-        ])
-        
-        for refund in vendor_refunds:
-            for line in refund.line_ids:
-                if line.account_id.account_type in ['liability_payable', 'liability_current']:
-                    # Reduce payable
-                    balances[line.account_id.id] -= abs(line.credit - line.debit)
-                elif line.account_id.account_type in ['asset_receivable', 'asset_cash', 'asset_current']:
-                    balances[line.account_id.id] -= abs(line.debit - line.credit)
-
-        # === PAYMENTS ===
-        payments = self.env['account.payment'].search([
-            ('state', '=', 'posted'),
-            ('date', '<=', date_to),
-            ('company_id', '=', company_id.id)
-        ])
-        
-        for payment in payments:
-            for line in payment.move_id.line_ids:
-                account_type = line.account_id.account_type
-                
-                # Assets (Cash, Bank) - Debit increases, Credit decreases
-                if account_type in ['asset_cash', 'asset_receivable', 'asset_current', 'asset_prepayment']:
-                    balances[line.account_id.id] += abs(line.debit - line.credit)
-                
-                # Liabilities (Payables) - Credit increases, Debit decreases
-                elif account_type in ['liability_payable', 'liability_current', 'liability_credit_card']:
-                    balances[line.account_id.id] += abs(line.credit - line.debit)
-
-        # === BANK STATEMENTS ===
-        bank_statements = self.env['account.bank.statement.line'].search([
+        # Domain for all posted journal items up to the end date
+        domain = [
+            ('move_id.state', '=', 'posted'),
             ('date', '<=', date_to),
             ('company_id', '=', company_id.id),
-            ('is_reconciled', '=', True)
-        ])
-        
-        for stmt_line in bank_statements:
-            if stmt_line.move_id and stmt_line.move_id.state == 'posted':
-                for line in stmt_line.move_id.line_ids:
-                    account_type = line.account_id.account_type
-                    if account_type in ['asset_cash', 'asset_receivable', 'asset_current']:
-                        balances[line.account_id.id] += abs(line.debit - line.credit)
-                    elif account_type in ['liability_payable', 'liability_current']:
-                        balances[line.account_id.id] += abs(line.credit - line.debit)
+            ('account_id', 'in', accounts.ids)
+        ]
 
-        # === MANUAL JOURNAL ENTRIES ===
-        manual_entries = self.env['account.move'].search([
-            ('move_type', '=', 'entry'),
-            ('state', '=', 'posted'),
-            ('date', '<=', date_to),
-            ('company_id', '=', company_id.id)
-        ])
-        
-        for entry in manual_entries:
-            for line in entry.line_ids:
-                account_type = line.account_id.account_type
+        # Use read_group to sum debit and credit by account
+        read_group_result = self.env['account.move.line'].read_group(
+            domain,
+            ['debit', 'credit', 'account_id'],
+            ['account_id']
+        )
+
+        # Asset types (natural debit balance)
+        asset_types = ('asset_receivable', 'asset_cash', 'asset_current', 
+                       'asset_fixed', 'asset_non_current', 'asset_prepayment')
+
+        # Calculate the natural balance for each account
+        for res in read_group_result:
+            if not res['account_id']:
+                continue
                 
-                # Balance Sheet accounts only
-                if account_type in ['asset_receivable', 'asset_cash', 'asset_current', 
-                                   'asset_fixed', 'asset_non_current', 'asset_prepayment']:
-                    # Assets: Debit increases, Credit decreases
-                    balances[line.account_id.id] += abs(line.debit - line.credit)
+            account_id = res['account_id'][0]
+            account_type = account_type_map.get(account_id)
+            
+            if not account_type:
+                continue
                 
-                elif account_type in ['liability_payable', 'liability_current', 
-                                     'liability_non_current', 'liability_credit_card']:
-                    # Liabilities: Credit increases, Debit decreases
-                    balances[line.account_id.id] += abs(line.credit - line.debit)
-                
-                elif account_type in ['equity', 'equity_unaffected']:
-                    # Capital: Credit increases, Debit decreases
-                    balances[line.account_id.id] += abs(line.credit - line.debit)
+            debit = res['debit'] or 0.0
+            credit = res['credit'] or 0.0
+            
+            if account_type in asset_types:
+                # Assets: Natural balance is Debit - Credit
+                balances[account_id] = debit - credit
+            else:
+                # Liabilities & Equity: Natural balance is Credit - Debit
+                balances[account_id] = credit - debit
 
         return balances
 
-    def _get_period_profit_loss_from_sources(self, date_from, date_to):
+    def _get_period_profit_loss(self, date_from, date_to, company_id):
         """
-        Calculate Net Profit/Loss from source documents - TALLY STANDARD
+        Calculate Net Profit/Loss from core journal items - TALLY STANDARD
         Returns: Positive for Profit, Negative for Loss
         """
+        
+        # Define P&L account types
+        pl_account_types = [
+            'income', 'income_other', 
+            'expense_direct_cost', 'expense', 'expense_depreciation'
+        ]
+        
+        # Find all relevant accounts
+        accounts = self.env['account.account'].search([
+            ('account_type', 'in', pl_account_types),
+            ('company_id', '=', company_id.id)
+        ])
+        if not accounts:
+            return 0.0
+
+        # Create a map of account_id to its type
+        account_type_map = {acc.id: acc.account_type for acc in accounts}
+        
+        # Domain for all posted journal items *within the period*
+        domain = [
+            ('move_id.state', '=', 'posted'),
+            ('date', '>=', date_from),
+            ('date', '<=', date_to),
+            ('company_id', '=', company_id.id),
+            ('account_id', 'in', accounts.ids)
+        ]
+
+        # Use read_group to sum debit and credit by account
+        read_group_result = self.env['account.move.line'].read_group(
+            domain,
+            ['debit', 'credit', 'account_id'],
+            ['account_id']
+        )
+        
         income_total = 0.0
         expense_total = 0.0
         
-        # === INCOME (CREDIT SIDE) ===
-        customer_invoices = self.env['account.move'].search([
-            ('move_type', '=', 'out_invoice'),
-            ('state', '=', 'posted'),
-            ('invoice_date', '>=', date_from),
-            ('invoice_date', '<=', date_to),
-            ('company_id', '=', self.company_id.id)
-        ])
-        
-        for invoice in customer_invoices:
-            for line in invoice.invoice_line_ids:
-                if line.account_id and line.account_id.account_type in ['income', 'income_other']:
-                    income_total += abs(line.price_subtotal)
+        # Income types (natural credit balance)
+        income_types = ('income', 'income_other')
 
-        customer_refunds = self.env['account.move'].search([
-            ('move_type', '=', 'out_refund'),
-            ('state', '=', 'posted'),
-            ('invoice_date', '>=', date_from),
-            ('invoice_date', '<=', date_to),
-            ('company_id', '=', self.company_id.id)
-        ])
-        
-        for refund in customer_refunds:
-            for line in refund.invoice_line_ids:
-                if line.account_id and line.account_id.account_type in ['income', 'income_other']:
-                    income_total -= abs(line.price_subtotal)
+        # Calculate natural balances
+        for res in read_group_result:
+            if not res['account_id']:
+                continue
+                
+            account_id = res['account_id'][0]
+            account_type = account_type_map.get(account_id)
+            
+            if not account_type:
+                continue
 
-        # === EXPENSES (DEBIT SIDE) ===
-        vendor_bills = self.env['account.move'].search([
-            ('move_type', '=', 'in_invoice'),
-            ('state', '=', 'posted'),
-            ('invoice_date', '>=', date_from),
-            ('invoice_date', '<=', date_to),
-            ('company_id', '=', self.company_id.id)
-        ])
-        
-        for bill in vendor_bills:
-            for line in bill.invoice_line_ids:
-                if line.account_id and line.account_id.account_type in [
-                    'expense_direct_cost', 'expense', 'expense_depreciation'
-                ]:
-                    expense_total += abs(line.price_subtotal)
+            debit = res['debit'] or 0.0
+            credit = res['credit'] or 0.0
 
-        vendor_refunds = self.env['account.move'].search([
-            ('move_type', '=', 'in_refund'),
-            ('state', '=', 'posted'),
-            ('invoice_date', '>=', date_from),
-            ('invoice_date', '<=', date_to),
-            ('company_id', '=', self.company_id.id)
-        ])
-        
-        for refund in vendor_refunds:
-            for line in refund.invoice_line_ids:
-                if line.account_id and line.account_id.account_type in [
-                    'expense_direct_cost', 'expense', 'expense_depreciation'
-                ]:
-                    expense_total -= abs(line.price_subtotal)
+            if account_type in income_types:
+                # Income: Credit - Debit
+                income_total += (credit - debit)
+            else:
+                # Expense: Debit - Credit
+                expense_total += (debit - credit)
 
-        # Manual journal entries for P&L accounts
-        manual_entries = self.env['account.move'].search([
-            ('move_type', '=', 'entry'),
-            ('state', '=', 'posted'),
-            ('date', '>=', date_from),
-            ('date', '<=', date_to),
-            ('company_id', '=', self.company_id.id)
-        ])
-        
-        for entry in manual_entries:
-            for line in entry.line_ids:
-                if line.account_id.account_type in ['income', 'income_other']:
-                    income_total += line.credit - line.debit
-                elif line.account_id.account_type in ['expense_direct_cost', 'expense', 'expense_depreciation']:
-                    expense_total += line.debit - line.credit
-
-        # Net P/L = Income - Expense (both positive values)
-        # Positive result = Profit (increases Capital)
-        # Negative result = Loss (decreases Capital)
+        # Net P/L = Total Income - Total Expense
+        # Positive result = Profit, Negative result = Loss
         return income_total - expense_total
 
     def _prepare_vertical_report_lines(self):
@@ -266,7 +177,7 @@ class BalanceSheetWizard(models.TransientModel):
         sequence = 0
         Account = self.env['account.account']
         
-        closing_balances = self._get_all_closing_balances_from_sources(self.end_date, self.company_id)
+        closing_balances = self._get_closing_balances(self.end_date, self.company_id)
 
         def _create_lines_for_type(account_types, level):
             """Returns lines with POSITIVE balances"""
@@ -277,12 +188,13 @@ class BalanceSheetWizard(models.TransientModel):
                 ('company_id', '=', self.company_id.id)
             ])
             for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
+                # Use the pre-calculated natural balance
                 balance = closing_balances.get(account.id, 0.0)
                 if abs(balance) < 0.01:
                     continue
                 account_lines.append({
                     'level': level,
-                    'name': f"{'  ' * level}{account.name}",
+                    'name': f"{'  ' * level}{account.name} ({account.code or 'N/A'})",
                     'code': account.code,
                     'amount': abs(balance),  # Always positive
                     'is_group': False,
@@ -308,7 +220,8 @@ class BalanceSheetWizard(models.TransientModel):
             lines.append(line_vals)
         
         # Add Current Period P&L to Capital
-        net_profit_loss = self._get_period_profit_loss_from_sources(self.start_date, self.end_date)
+        net_profit_loss = self._get_period_profit_loss(self.start_date, self.end_date, self.company_id)
+        
         if abs(net_profit_loss) > 0.01:
             sequence += 10
             pl_name = "  Profit & Loss A/c (Profit)" if net_profit_loss >= 0 else "  Profit & Loss A/c (Loss)"
@@ -318,6 +231,7 @@ class BalanceSheetWizard(models.TransientModel):
             })
         
         # Total Capital (Capital + Profit - Loss)
+        # Note: capital_total is already positive (natural balance)
         total_capital = capital_total + net_profit_loss
         lines[capital_group_idx]['amount'] = abs(total_capital)
 
@@ -353,7 +267,8 @@ class BalanceSheetWizard(models.TransientModel):
             lines.append(line_vals)
         lines[ncl_group_idx]['amount'] = ncl_total
 
-        total_liabilities = abs(total_capital) + cl_total + ncl_total
+        # Total Liabilities side (Capital + P&L + Liabilities)
+        total_liabilities_side = abs(total_capital) + cl_total + ncl_total
 
         # === ASSETS ===
         
@@ -393,7 +308,7 @@ class BalanceSheetWizard(models.TransientModel):
 
         # === TOTAL (Should match on both sides) ===
         sequence += 10
-        balance_total = max(total_liabilities, total_assets)
+        balance_total = max(total_liabilities_side, total_assets)
         lines.append({
             'wizard_id': self.id, 'sequence': sequence, 'level': 0,
             'name': 'Total', 'amount': balance_total,
@@ -414,7 +329,7 @@ class BalanceSheetWizard(models.TransientModel):
         asset_seq = 0
         
         Account = self.env['account.account']
-        closing_balances = self._get_all_closing_balances_from_sources(self.end_date, self.company_id)
+        closing_balances = self._get_closing_balances(self.end_date, self.company_id)
         
         def _create_lines(account_types, level):
             """Returns lines with POSITIVE balances"""
@@ -429,7 +344,7 @@ class BalanceSheetWizard(models.TransientModel):
                 if abs(balance) < 0.01:
                     continue
                 account_lines_data.append({
-                    'level': level, 'name': f"{'  ' * level}{account.name}",
+                    'level': level, 'name': f"{'  ' * level}{account.name} ({account.code or 'N/A'})",
                     'code': account.code, 'amount': abs(balance),
                     'is_group': False, 'is_total': False,
                 })
@@ -452,7 +367,7 @@ class BalanceSheetWizard(models.TransientModel):
             line_vals.update({'wizard_liab_id': self.id, 'sequence': liab_seq})
             liab_lines.append(line_vals)
         
-        net_profit_loss = self._get_period_profit_loss_from_sources(self.start_date, self.end_date)
+        net_profit_loss = self._get_period_profit_loss(self.start_date, self.end_date, self.company_id)
         if abs(net_profit_loss) > 0.01:
             liab_seq += 10
             pl_name = "  Profit & Loss A/c (Profit)" if net_profit_loss >= 0 else "  Profit & Loss A/c (Loss)"
@@ -541,9 +456,12 @@ class BalanceSheetWizard(models.TransientModel):
             'wizard_asset_id': self.id, 'sequence': asset_seq, 'level': 0,
             'name': 'Total', 'amount': total_assets, 'is_total': True
         })
-
-        self.env['tally.balance.sheet.line'].create(liab_lines)
-        self.env['tally.balance.sheet.line'].create(asset_lines)
+        
+        # --- Create Lines ---
+        if liab_lines:
+            self.env['tally.balance.sheet.line'].create(liab_lines)
+        if asset_lines:
+            self.env['tally.balance.sheet.line'].create(asset_lines)
 
     def action_view_report(self):
         self.ensure_one()
