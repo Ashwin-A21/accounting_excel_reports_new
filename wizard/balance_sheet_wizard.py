@@ -9,7 +9,9 @@ class BalanceSheetWizard(models.TransientModel):
     _name = 'balance.sheet.wizard'
     _description = 'Balance Sheet Report Wizard'
 
-    start_date = fields.Date(string='Start Date', required=True)
+    # REMOVED: start_date field is not correct for a B/S report
+    # start_date = fields.Date(string='Start Date', required=True) 
+    
     end_date = fields.Date(string='As on Date', required=True)
     company_id = fields.Many2one('res.company', string='Company', 
                                  required=True, 
@@ -21,11 +23,10 @@ class BalanceSheetWizard(models.TransientModel):
     liability_line_ids = fields.One2many('tally.balance.sheet.line', 'wizard_liab_id', string='Liability Lines')
     asset_line_ids = fields.One2many('tally.balance.sheet.line', 'wizard_asset_id', string='Asset Lines')
 
-    @api.constrains('start_date', 'end_date')
-    def _check_dates(self):
-        for record in self:
-            if record.start_date > record.end_date:
-                raise UserError('End Date must be greater than Start Date!')
+    # REMOVED: _check_dates constraint is no longer needed
+    # @api.constrains('start_date', 'end_date')
+    # def _check_dates(self):
+    #     ...
 
     def _get_closing_balances(self, date_to, company_id):
         """
@@ -219,8 +220,14 @@ class BalanceSheetWizard(models.TransientModel):
             line_vals.update({'wizard_id': self.id, 'sequence': sequence})
             lines.append(line_vals)
         
+        # --- FIX ---
         # Add Current Period P&L to Capital
-        net_profit_loss = self._get_period_profit_loss(self.start_date, self.end_date, self.company_id)
+        # P&L must be calculated from the start of the fiscal year
+        fiscal_year_start = self.company_id.compute_fiscalyear_dates(self.end_date)['date_from']
+        net_profit_loss = self._get_period_profit_loss(
+            fiscal_year_start, self.end_date, self.company_id
+        )
+        # --- END FIX ---
         
         if abs(net_profit_loss) > 0.01:
             sequence += 10
@@ -367,7 +374,15 @@ class BalanceSheetWizard(models.TransientModel):
             line_vals.update({'wizard_liab_id': self.id, 'sequence': liab_seq})
             liab_lines.append(line_vals)
         
-        net_profit_loss = self._get_period_profit_loss(self.start_date, self.end_date, self.company_id)
+        # --- FIX ---
+        # Add Current Period P&L to Capital
+        # P&L must be calculated from the start of the fiscal year
+        fiscal_year_start = self.company_id.compute_fiscalyear_dates(self.end_date)['date_from']
+        net_profit_loss = self._get_period_profit_loss(
+            fiscal_year_start, self.end_date, self.company_id
+        )
+        # --- END FIX ---
+        
         if abs(net_profit_loss) > 0.01:
             liab_seq += 10
             pl_name = "  Profit & Loss A/c (Profit)" if net_profit_loss >= 0 else "  Profit & Loss A/c (Loss)"

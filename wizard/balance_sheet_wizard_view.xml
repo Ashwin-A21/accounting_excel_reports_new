@@ -7,7 +7,6 @@
             <form string="Balance Sheet Report">
                 <group>
                     <group>
-                        <field name="start_date"/>
                         <field name="end_date"/>
                     </group>
                     <group>
