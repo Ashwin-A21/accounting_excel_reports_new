@@ -8,9 +8,6 @@ from collections import defaultdict
 class BalanceSheetWizard(models.TransientModel):
     _name = 'balance.sheet.wizard'
     _description = 'Balance Sheet Report Wizard'
-
-    # REMOVED: start_date field is not correct for a B/S report
-    # start_date = fields.Date(string='Start Date', required=True) 
     
     end_date = fields.Date(string='As on Date', required=True)
     company_id = fields.Many2one('res.company', string='Company', 
@@ -23,22 +20,61 @@ class BalanceSheetWizard(models.TransientModel):
     liability_line_ids = fields.One2many('tally.balance.sheet.line', 'wizard_liab_id', string='Liability Lines')
     asset_line_ids = fields.One2many('tally.balance.sheet.line', 'wizard_asset_id', string='Asset Lines')
 
-    # REMOVED: _check_dates constraint is no longer needed
-    # @api.constrains('start_date', 'end_date')
-    # def _check_dates(self):
-    #     ...
+    def _classify_bs_account_to_tally_group(self, account):
+        """Classify Balance Sheet accounts into Tally-style groups"""
+        account_type = account.account_type
+        name = (account.name or '').lower()
+        
+        # === LIABILITIES ===
+        if account_type in ('equity', 'equity_unaffected'):
+            return 'Capital Account'
+        
+        if account_type == 'liability_payable' or account.reconcile:
+            if 'payable' in name or 'creditor' in name or 'supplier' in name:
+                return 'Sundry Creditors'
+        
+        if account_type in ('liability_current', 'liability_credit_card'):
+            if 'tax' in name or 'gst' in name or 'vat' in name:
+                return 'Duties & Taxes'
+            if 'provision' in name:
+                return 'Provisions'
+            return 'Current Liabilities'
+        
+        if account_type == 'liability_non_current':
+            if 'loan' in name or 'borrowing' in name:
+                return 'Loans (Liability)'
+            return 'Current Liabilities'
+        
+        # === ASSETS ===
+        if account_type in ('asset_fixed', 'asset_non_current'):
+            return 'Fixed Assets'
+        
+        if account_type == 'asset_receivable' or account.reconcile:
+            if 'receivable' in name or 'debtor' in name or 'customer' in name:
+                return 'Sundry Debtors'
+        
+        if account_type == 'asset_cash':
+            if 'cash' in name or 'petty' in name:
+                return 'Cash-in-Hand'
+            return 'Bank Accounts'
+        
+        if account_type in ('asset_current', 'asset_prepayment'):
+            if 'inventory' in name or 'stock' in name:
+                return 'Stock-in-Hand'
+            if 'deposit' in name or 'advance' in name:
+                return 'Deposits (Asset)'
+            if 'bank' in name:
+                return 'Bank Accounts'
+            return 'Current Assets'
+        
+        return 'Miscellaneous'
 
     def _get_closing_balances(self, date_to, company_id):
         """
-        Get closing balances from core journal items - TALLY STANDARD
-        Returns balances as NATURAL AMOUNTS (always positive):
-        - Assets: Positive (Debit balance)
-        - Liabilities: Positive (Credit balance)
-        - Capital: Positive (Credit balance)
+        Get closing balances - NET BALANCES for reconcilable accounts
         """
         balances = defaultdict(float)
         
-        # Define Balance Sheet account types
         bs_account_types = [
             'asset_receivable', 'asset_cash', 'asset_current', 'asset_prepayment',
             'asset_fixed', 'asset_non_current',
@@ -47,83 +83,59 @@ class BalanceSheetWizard(models.TransientModel):
             'equity', 'equity_unaffected'
         ]
         
-        # Find all relevant accounts
         accounts = self.env['account.account'].search([
             ('account_type', 'in', bs_account_types),
             ('company_id', '=', company_id.id)
         ])
+        
         if not accounts:
             return balances
 
-        # Create a map of account_id to its type
-        account_type_map = {acc.id: acc.account_type for acc in accounts}
+        for account in accounts:
+            domain = [
+                ('account_id', '=', account.id),
+                ('move_id.state', '=', 'posted'),
+                ('date', '<=', date_to),
+                ('company_id', '=', company_id.id)
+            ]
+            
+            # For reconcilable accounts, only unreconciled items
+            if account.reconcile:
+                domain.append(('reconciled', '=', False))
+            
+            result = self.env['account.move.line'].read_group(
+                domain,
+                ['debit', 'credit'],
+                []
+            )
+            
+            if result:
+                debit = result[0].get('debit', 0.0)
+                credit = result[0].get('credit', 0.0)
+                balance = debit - credit
+                
+                if abs(balance) >= 0.01:
+                    balances[account.id] = balance
         
-        # Domain for all posted journal items up to the end date
-        domain = [
-            ('move_id.state', '=', 'posted'),
-            ('date', '<=', date_to),
-            ('company_id', '=', company_id.id),
-            ('account_id', 'in', accounts.ids)
-        ]
-
-        # Use read_group to sum debit and credit by account
-        read_group_result = self.env['account.move.line'].read_group(
-            domain,
-            ['debit', 'credit', 'account_id'],
-            ['account_id']
-        )
-
-        # Asset types (natural debit balance)
-        asset_types = ('asset_receivable', 'asset_cash', 'asset_current', 
-                       'asset_fixed', 'asset_non_current', 'asset_prepayment')
-
-        # Calculate the natural balance for each account
-        for res in read_group_result:
-            if not res['account_id']:
-                continue
-                
-            account_id = res['account_id'][0]
-            account_type = account_type_map.get(account_id)
-            
-            if not account_type:
-                continue
-                
-            debit = res['debit'] or 0.0
-            credit = res['credit'] or 0.0
-            
-            if account_type in asset_types:
-                # Assets: Natural balance is Debit - Credit
-                balances[account_id] = debit - credit
-            else:
-                # Liabilities & Equity: Natural balance is Credit - Debit
-                balances[account_id] = credit - debit
-
         return balances
 
     def _get_period_profit_loss(self, date_from, date_to, company_id):
-        """
-        Calculate Net Profit/Loss from core journal items - TALLY STANDARD
-        Returns: Positive for Profit, Negative for Loss
-        """
-        
-        # Define P&L account types
+        """Calculate Net Profit/Loss for the fiscal year"""
         pl_account_types = [
             'income', 'income_other', 
             'expense_direct_cost', 'expense', 'expense_depreciation'
         ]
         
-        # Find all relevant accounts
         accounts = self.env['account.account'].search([
             ('account_type', 'in', pl_account_types),
             ('company_id', '=', company_id.id)
         ])
+        
         if not accounts:
             return 0.0
 
-        # Create a map of account_id to its type
         account_type_map = {acc.id: acc.account_type for acc in accounts}
         
-        # Domain for all posted journal items *within the period*
         domain = [
             ('move_id.state', '=', 'posted'),
             ('date', '>=', date_from),
@@ -132,7 +144,6 @@ class BalanceSheetWizard(models.TransientModel):
             ('account_id', 'in', accounts.ids)
         ]
 
-        # Use read_group to sum debit and credit by account
         read_group_result = self.env['account.move.line'].read_group(
             domain,
             ['debit', 'credit', 'account_id'],
@@ -142,10 +153,8 @@ class BalanceSheetWizard(models.TransientModel):
         income_total = 0.0
         expense_total = 0.0
         
-        # Income types (natural credit balance)
         income_types = ('income', 'income_other')
 
-        # Calculate natural balances
         for res in read_group_result:
             if not res['account_id']:
                 continue
@@ -160,319 +169,429 @@ class BalanceSheetWizard(models.TransientModel):
             credit = res['credit'] or 0.0
 
             if account_type in income_types:
-                # Income: Credit - Debit
                 income_total += (credit - debit)
             else:
-                # Expense: Debit - Credit
                 expense_total += (debit - credit)
 
-        # Net P/L = Total Income - Total Expense
-        # Positive result = Profit, Negative result = Loss
         return income_total - expense_total
 
     def _prepare_vertical_report_lines(self):
-        """Prepare Balance Sheet in vertical format - TALLY STANDARD"""
+        """Prepare Balance Sheet in vertical format"""
         self.ensure_one()
         self.line_ids.unlink()
-        lines = []
-        sequence = 0
-        Account = self.env['account.account']
         
         closing_balances = self._get_closing_balances(self.end_date, self.company_id)
-
-        def _create_lines_for_type(account_types, level):
-            """Returns lines with POSITIVE balances"""
-            account_lines = []
-            group_total = 0.0
-            accounts = Account.search([
-                ('account_type', 'in', account_types),
-                ('company_id', '=', self.company_id.id)
-            ])
-            for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
-                # Use the pre-calculated natural balance
-                balance = closing_balances.get(account.id, 0.0)
-                if abs(balance) < 0.01:
-                    continue
-                account_lines.append({
-                    'level': level,
-                    'name': f"{'  ' * level}{account.name} ({account.code or 'N/A'})",
-                    'code': account.code,
-                    'amount': abs(balance),  # Always positive
-                    'is_group': False,
-                    'is_total': False,
-                })
-                group_total += abs(balance)
-            return account_lines, group_total
-
-        # === LIABILITIES & CAPITAL ===
         
-        # Capital Account
-        sequence += 10
-        lines.append({
-            'wizard_id': self.id, 'sequence': sequence, 'level': 0,
-            'name': 'Capital Account', 'is_group': True, 'amount': 0.0,
-        })
-        capital_group_idx = len(lines) - 1
+        if not closing_balances:
+            return
         
-        account_lines, capital_total = _create_lines_for_type(['equity', 'equity_unaffected'], 1)
-        for line_vals in account_lines:
-            sequence += 10
-            line_vals.update({'wizard_id': self.id, 'sequence': sequence})
-            lines.append(line_vals)
+        all_accounts = self.env['account.account'].browse(closing_balances.keys())
         
-        # --- FIX ---
-        # Add Current Period P&L to Capital
-        # P&L must be calculated from the start of the fiscal year
+        # Group accounts
+        accounts_by_group = defaultdict(lambda: self.env['account.account'])
+        
+        for account in all_accounts:
+            group_name = self._classify_bs_account_to_tally_group(account)
+            accounts_by_group[group_name] |= account
+        
+        # Tally BS Group Order
+        liability_groups = [
+            'Capital Account',
+            'Current Liabilities',
+            'Loans (Liability)',
+            'Sundry Creditors',
+            'Duties & Taxes',
+            'Provisions'
+        ]
+        
+        asset_groups = [
+            'Fixed Assets',
+            'Current Assets',
+            'Stock-in-Hand',
+            'Sundry Debtors',
+            'Cash-in-Hand',
+            'Bank Accounts',
+            'Deposits (Asset)',
+            'Miscellaneous'
+        ]
+        
+        lines = []
+        sequence = 0
+        
+        # Calculate fiscal year P&L
         fiscal_year_start = self.company_id.compute_fiscalyear_dates(self.end_date)['date_from']
         net_profit_loss = self._get_period_profit_loss(
             fiscal_year_start, self.end_date, self.company_id
         )
-        # --- END FIX ---
         
-        if abs(net_profit_loss) > 0.01:
-            sequence += 10
-            pl_name = "  Profit & Loss A/c (Profit)" if net_profit_loss >= 0 else "  Profit & Loss A/c (Loss)"
-            lines.append({
-                'wizard_id': self.id, 'sequence': sequence, 'level': 1,
-                'name': pl_name, 'amount': abs(net_profit_loss),
-            })
+        # === LIABILITIES ===
+        total_liabilities = 0.0
         
-        # Total Capital (Capital + Profit - Loss)
-        # Note: capital_total is already positive (natural balance)
-        total_capital = capital_total + net_profit_loss
-        lines[capital_group_idx]['amount'] = abs(total_capital)
-
-        # Current Liabilities
-        sequence += 10
-        lines.append({
-            'wizard_id': self.id, 'sequence': sequence, 'level': 0,
-            'name': 'Current Liabilities', 'is_group': True, 'amount': 0.0,
-        })
-        cl_group_idx = len(lines) - 1
+        for group_name in liability_groups:
+            accounts = accounts_by_group.get(group_name)
+            if not accounts:
+                if group_name == 'Capital Account':
+                    # Always show Capital Account even if empty
+                    sequence += 10
+                    lines.append({
+                        'wizard_id': self.id,
+                        'sequence': sequence,
+                        'level': 0,
+                        'name': group_name,
+                        'amount': 0.0,
+                        'is_group': True,
+                    })
+                continue
+            
+            group_total = 0.0
+            group_lines = []
+            
+            for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
+                balance = closing_balances.get(account.id, 0.0)
+                
+                if abs(balance) < 0.01:
+                    continue
+                
+                # For liabilities, we want credit balance (negative in our system)
+                # Convert to positive for display
+                amount = abs(balance)
+                
+                group_lines.append({
+                    'level': 1,
+                    'name': f"  {account.name}",
+                    'code': account.code,
+                    'amount': amount,
+                    'is_group': False,
+                })
+                
+                # For liability accounts, credit balance is normal
+                if balance < 0:
+                    group_total += amount
+                else:
+                    # Debit balance in liability account (unusual)
+                    group_total -= amount
+            
+            if group_lines or group_name == 'Capital Account':
+                sequence += 10
+                
+                # Add P&L to Capital Account
+                if group_name == 'Capital Account':
+                    group_total += net_profit_loss
+                
+                lines.append({
+                    'wizard_id': self.id,
+                    'sequence': sequence,
+                    'level': 0,
+                    'name': group_name,
+                    'amount': abs(group_total),
+                    'is_group': True,
+                })
+                
+                for line_vals in group_lines:
+                    sequence += 10
+                    line_vals.update({
+                        'wizard_id': self.id,
+                        'sequence': sequence
+                    })
+                    lines.append(line_vals)
+                
+                # Add P&L line under Capital
+                if group_name == 'Capital Account' and abs(net_profit_loss) > 0.01:
+                    sequence += 10
+                    pl_name = "  Net Profit" if net_profit_loss >= 0 else "  Net Loss"
+                    lines.append({
+                        'wizard_id': self.id,
+                        'sequence': sequence,
+                        'level': 1,
+                        'name': pl_name,
+                        'amount': abs(net_profit_loss),
+                    })
+                
+                total_liabilities += abs(group_total)
         
-        account_lines, cl_total = _create_lines_for_type(
-            ['liability_payable', 'liability_credit_card', 'liability_current'], 1
-        )
-        for line_vals in account_lines:
-            sequence += 10
-            line_vals.update({'wizard_id': self.id, 'sequence': sequence})
-            lines.append(line_vals)
-        lines[cl_group_idx]['amount'] = cl_total
-
-        # Loans (Liability)
-        sequence += 10
-        lines.append({
-            'wizard_id': self.id, 'sequence': sequence, 'level': 0,
-            'name': 'Loans (Liability)', 'is_group': True, 'amount': 0.0,
-        })
-        ncl_group_idx = len(lines) - 1
-        
-        account_lines, ncl_total = _create_lines_for_type(['liability_non_current'], 1)
-        for line_vals in account_lines:
-            sequence += 10
-            line_vals.update({'wizard_id': self.id, 'sequence': sequence})
-            lines.append(line_vals)
-        lines[ncl_group_idx]['amount'] = ncl_total
-
-        # Total Liabilities side (Capital + P&L + Liabilities)
-        total_liabilities_side = abs(total_capital) + cl_total + ncl_total
-
         # === ASSETS ===
+        total_assets = 0.0
         
-        # Fixed Assets
-        sequence += 10
-        lines.append({
-            'wizard_id': self.id, 'sequence': sequence, 'level': 0,
-            'name': 'Fixed Assets', 'is_group': True, 'amount': 0.0,
-        })
-        fa_group_idx = len(lines) - 1
+        for group_name in asset_groups:
+            accounts = accounts_by_group.get(group_name)
+            if not accounts:
+                continue
+            
+            group_total = 0.0
+            group_lines = []
+            
+            for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
+                balance = closing_balances.get(account.id, 0.0)
+                
+                if abs(balance) < 0.01:
+                    continue
+                
+                amount = abs(balance)
+                
+                group_lines.append({
+                    'level': 1,
+                    'name': f"  {account.name}",
+                    'code': account.code,
+                    'amount': amount,
+                    'is_group': False,
+                })
+                
+                # For asset accounts, debit balance is normal
+                if balance > 0:
+                    group_total += amount
+                else:
+                    # Credit balance in asset account (unusual)
+                    group_total -= amount
+            
+            if group_lines:
+                sequence += 10
+                lines.append({
+                    'wizard_id': self.id,
+                    'sequence': sequence,
+                    'level': 0,
+                    'name': group_name,
+                    'amount': abs(group_total),
+                    'is_group': True,
+                })
+                
+                for line_vals in group_lines:
+                    sequence += 10
+                    line_vals.update({
+                        'wizard_id': self.id,
+                        'sequence': sequence
+                    })
+                    lines.append(line_vals)
+                
+                total_assets += abs(group_total)
         
-        account_lines, fa_total = _create_lines_for_type(['asset_fixed', 'asset_non_current'], 1)
-        for line_vals in account_lines:
-            sequence += 10
-            line_vals.update({'wizard_id': self.id, 'sequence': sequence})
-            lines.append(line_vals)
-        lines[fa_group_idx]['amount'] = fa_total
-
-        # Current Assets
+        # Total
         sequence += 10
+        balance_total = max(total_liabilities, total_assets)
         lines.append({
-            'wizard_id': self.id, 'sequence': sequence, 'level': 0,
-            'name': 'Current Assets', 'is_group': True, 'amount': 0.0,
-        })
-        ca_group_idx = len(lines) - 1
-        
-        account_lines, ca_total = _create_lines_for_type(
-            ['asset_receivable', 'asset_cash', 'asset_current', 'asset_prepayment'], 1
-        )
-        for line_vals in account_lines:
-            sequence += 10
-            line_vals.update({'wizard_id': self.id, 'sequence': sequence})
-            lines.append(line_vals)
-        lines[ca_group_idx]['amount'] = ca_total
-
-        total_assets = fa_total + ca_total
-
-        # === TOTAL (Should match on both sides) ===
-        sequence += 10
-        balance_total = max(total_liabilities_side, total_assets)
-        lines.append({
-            'wizard_id': self.id, 'sequence': sequence, 'level': 0,
-            'name': 'Total', 'amount': balance_total,
+            'wizard_id': self.id,
+            'sequence': sequence,
+            'level': 0,
+            'name': 'Total',
+            'amount': balance_total,
             'is_total': True,
         })
 
         self.env['tally.balance.sheet.line'].create(lines)
 
     def _prepare_horizontal_report_lines(self):
-        """Prepare Balance Sheet in horizontal format - TALLY STANDARD"""
+        """Prepare Balance Sheet in horizontal format"""
         self.ensure_one()
         self.liability_line_ids.unlink()
         self.asset_line_ids.unlink()
+        
+        closing_balances = self._get_closing_balances(self.end_date, self.company_id)
+        
+        if not closing_balances:
+            return
+        
+        all_accounts = self.env['account.account'].browse(closing_balances.keys())
+        
+        accounts_by_group = defaultdict(lambda: self.env['account.account'])
+        
+        for account in all_accounts:
+            group_name = self._classify_bs_account_to_tally_group(account)
+            accounts_by_group[group_name] |= account
+        
+        liability_groups = [
+            'Capital Account',
+            'Current Liabilities',
+            'Loans (Liability)',
+            'Sundry Creditors',
+            'Duties & Taxes',
+            'Provisions'
+        ]
+        
+        asset_groups = [
+            'Fixed Assets',
+            'Current Assets',
+            'Stock-in-Hand',
+            'Sundry Debtors',
+            'Cash-in-Hand',
+            'Bank Accounts',
+            'Deposits (Asset)',
+            'Miscellaneous'
+        ]
         
         liab_lines = []
         asset_lines = []
         liab_seq = 0
         asset_seq = 0
         
-        Account = self.env['account.account']
-        closing_balances = self._get_closing_balances(self.end_date, self.company_id)
-        
-        def _create_lines(account_types, level):
-            """Returns lines with POSITIVE balances"""
-            account_lines_data = []
-            group_total = 0.0
-            accounts = Account.search([
-                ('account_type', 'in', account_types),
-                ('company_id', '=', self.company_id.id)
-            ])
-            for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
-                balance = closing_balances.get(account.id, 0.0)
-                if abs(balance) < 0.01:
-                    continue
-                account_lines_data.append({
-                    'level': level, 'name': f"{'  ' * level}{account.name} ({account.code or 'N/A'})",
-                    'code': account.code, 'amount': abs(balance),
-                    'is_group': False, 'is_total': False,
-                })
-                group_total += abs(balance)
-            return account_lines_data, group_total
-
-        # === LIABILITIES SIDE ===
-        
-        # Capital Account
-        liab_seq += 10
-        liab_lines.append({
-            'wizard_liab_id': self.id, 'sequence': liab_seq, 'level': 0,
-            'name': 'Capital Account', 'is_group': True, 'amount': 0.0,
-        })
-        capital_idx = len(liab_lines) - 1
-        
-        account_lines, capital_total = _create_lines(['equity', 'equity_unaffected'], 1)
-        for line_vals in account_lines:
-            liab_seq += 10
-            line_vals.update({'wizard_liab_id': self.id, 'sequence': liab_seq})
-            liab_lines.append(line_vals)
-        
-        # --- FIX ---
-        # Add Current Period P&L to Capital
-        # P&L must be calculated from the start of the fiscal year
         fiscal_year_start = self.company_id.compute_fiscalyear_dates(self.end_date)['date_from']
         net_profit_loss = self._get_period_profit_loss(
             fiscal_year_start, self.end_date, self.company_id
         )
-        # --- END FIX ---
         
-        if abs(net_profit_loss) > 0.01:
-            liab_seq += 10
-            pl_name = "  Profit & Loss A/c (Profit)" if net_profit_loss >= 0 else "  Profit & Loss A/c (Loss)"
-            liab_lines.append({
-                'wizard_liab_id': self.id, 'sequence': liab_seq, 'level': 1,
-                'name': pl_name, 'amount': abs(net_profit_loss),
-            })
+        total_liabilities = 0.0
         
-        total_capital = capital_total + net_profit_loss
-        liab_lines[capital_idx]['amount'] = abs(total_capital)
-
-        # Current Liabilities
+        # Process Liabilities
+        for group_name in liability_groups:
+            accounts = accounts_by_group.get(group_name)
+            if not accounts:
+                if group_name == 'Capital Account':
+                    liab_seq += 10
+                    liab_lines.append({
+                        'wizard_liab_id': self.id,
+                        'sequence': liab_seq,
+                        'level': 0,
+                        'name': group_name,
+                        'amount': abs(net_profit_loss),
+                        'is_group': True,
+                    })
+                    
+                    if abs(net_profit_loss) > 0.01:
+                        liab_seq += 10
+                        pl_name = "  Net Profit" if net_profit_loss >= 0 else "  Net Loss"
+                        liab_lines.append({
+                            'wizard_liab_id': self.id,
+                            'sequence': liab_seq,
+                            'level': 1,
+                            'name': pl_name,
+                            'amount': abs(net_profit_loss),
+                        })
+                    
+                    total_liabilities += abs(net_profit_loss)
+                continue
+            
+            group_total = 0.0
+            group_lines = []
+            
+            for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
+                balance = closing_balances.get(account.id, 0.0)
+                
+                if abs(balance) < 0.01:
+                    continue
+                
+                amount = abs(balance)
+                
+                group_lines.append({
+                    'level': 1,
+                    'name': f"  {account.name}",
+                    'code': account.code,
+                    'amount': amount,
+                    'is_group': False,
+                })
+                
+                if balance < 0:
+                    group_total += amount
+                else:
+                    group_total -= amount
+            
+            if group_lines or group_name == 'Capital Account':
+                liab_seq += 10
+                
+                if group_name == 'Capital Account':
+                    group_total += net_profit_loss
+                
+                liab_lines.append({
+                    'wizard_liab_id': self.id,
+                    'sequence': liab_seq,
+                    'level': 0,
+                    'name': group_name,
+                    'amount': abs(group_total),
+                    'is_group': True,
+                })
+                
+                for line_vals in group_lines:
+                    liab_seq += 10
+                    line_vals.update({
+                        'wizard_liab_id': self.id,
+                        'sequence': liab_seq
+                    })
+                    liab_lines.append(line_vals)
+                
+                if group_name == 'Capital Account' and abs(net_profit_loss) > 0.01:
+                    liab_seq += 10
+                    pl_name = "  Net Profit" if net_profit_loss >= 0 else "  Net Loss"
+                    liab_lines.append({
+                        'wizard_liab_id': self.id,
+                        'sequence': liab_seq,
+                        'level': 1,
+                        'name': pl_name,
+                        'amount': abs(net_profit_loss),
+                    })
+                
+                total_liabilities += abs(group_total)
+        
+        # Process Assets
+        total_assets = 0.0
+        
+        for group_name in asset_groups:
+            accounts = accounts_by_group.get(group_name)
+            if not accounts:
+                continue
+            
+            group_total = 0.0
+            group_lines = []
+            
+            for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
+                balance = closing_balances.get(account.id, 0.0)
+                
+                if abs(balance) < 0.01:
+                    continue
+                
+                amount = abs(balance)
+                
+                group_lines.append({
+                    'level': 1,
+                    'name': f"  {account.name}",
+                    'code': account.code,
+                    'amount': amount,
+                    'is_group': False,
+                })
+                
+                if balance > 0:
+                    group_total += amount
+                else:
+                    group_total -= amount
+            
+            if group_lines:
+                asset_seq += 10
+                asset_lines.append({
+                    'wizard_asset_id': self.id,
+                    'sequence': asset_seq,
+                    'level': 0,
+                    'name': group_name,
+                    'amount': abs(group_total),
+                    'is_group': True,
+                })
+                
+                for line_vals in group_lines:
+                    asset_seq += 10
+                    line_vals.update({
+                        'wizard_asset_id': self.id,
+                        'sequence': asset_seq
+                    })
+                    asset_lines.append(line_vals)
+                
+                total_assets += abs(group_total)
+        
+        # Totals
         liab_seq += 10
         liab_lines.append({
-            'wizard_liab_id': self.id, 'sequence': liab_seq, 'level': 0,
-            'name': 'Current Liabilities', 'is_group': True, 'amount': 0.0,
+            'wizard_liab_id': self.id,
+            'sequence': liab_seq,
+            'level': 0,
+            'name': 'Total',
+            'amount': total_liabilities,
+            'is_total': True
         })
-        cl_idx = len(liab_lines) - 1
-        
-        account_lines, cl_total = _create_lines(['liability_payable', 'liability_credit_card', 'liability_current'], 1)
-        for line_vals in account_lines:
-            liab_seq += 10
-            line_vals.update({'wizard_liab_id': self.id, 'sequence': liab_seq})
-            liab_lines.append(line_vals)
-        liab_lines[cl_idx]['amount'] = cl_total
-
-        # Loans (Liability)
-        liab_seq += 10
-        liab_lines.append({
-            'wizard_liab_id': self.id, 'sequence': liab_seq, 'level': 0,
-            'name': 'Loans (Liability)', 'is_group': True, 'amount': 0.0,
-        })
-        ncl_idx = len(liab_lines) - 1
-        
-        account_lines, ncl_total = _create_lines(['liability_non_current'], 1)
-        for line_vals in account_lines:
-            liab_seq += 10
-            line_vals.update({'wizard_liab_id': self.id, 'sequence': liab_seq})
-            liab_lines.append(line_vals)
-        liab_lines[ncl_idx]['amount'] = ncl_total
-
-        total_liabilities = abs(total_capital) + cl_total + ncl_total
-        
-        liab_seq += 10
-        liab_lines.append({
-            'wizard_liab_id': self.id, 'sequence': liab_seq, 'level': 0,
-            'name': 'Total', 'amount': total_liabilities, 'is_total': True
-        })
-
-        # === ASSETS SIDE ===
-        
-        # Fixed Assets
-        asset_seq += 10
-        asset_lines.append({
-            'wizard_asset_id': self.id, 'sequence': asset_seq, 'level': 0,
-            'name': 'Fixed Assets', 'is_group': True, 'amount': 0.0,
-        })
-        fa_idx = len(asset_lines) - 1
-        
-        account_lines, fa_total = _create_lines(['asset_fixed', 'asset_non_current'], 1)
-        for line_vals in account_lines:
-            asset_seq += 10
-            line_vals.update({'wizard_asset_id': self.id, 'sequence': asset_seq})
-            asset_lines.append(line_vals)
-        asset_lines[fa_idx]['amount'] = fa_total
-
-        # Current Assets
-        asset_seq += 10
-        asset_lines.append({
-            'wizard_asset_id': self.id, 'sequence': asset_seq, 'level': 0,
-            'name': 'Current Assets', 'is_group': True, 'amount': 0.0,
-        })
-        ca_idx = len(asset_lines) - 1
-        
-        account_lines, ca_total = _create_lines(['asset_receivable', 'asset_cash', 'asset_current', 'asset_prepayment'], 1)
-        for line_vals in account_lines:
-            asset_seq += 10
-            line_vals.update({'wizard_asset_id': self.id, 'sequence': asset_seq})
-            asset_lines.append(line_vals)
-        asset_lines[ca_idx]['amount'] = ca_total
-
-        total_assets = fa_total + ca_total
         
         asset_seq += 10
         asset_lines.append({
-            'wizard_asset_id': self.id, 'sequence': asset_seq, 'level': 0,
-            'name': 'Total', 'amount': total_assets, 'is_total': True
+            'wizard_asset_id': self.id,
+            'sequence': asset_seq,
+            'level': 0,
+            'name': 'Total',
+            'amount': total_assets,
+            'is_total': True
         })
         
-        # --- Create Lines ---
         if liab_lines:
             self.env['tally.balance.sheet.line'].create(liab_lines)
         if asset_lines:

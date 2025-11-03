@@ -24,33 +24,58 @@ class ProfitLossWizard(models.TransientModel):
             if record.start_date > record.end_date:
                 raise UserError('End Date must be greater than Start Date!')
 
+    def _classify_pl_account_to_tally_group(self, account):
+        """Classify P&L accounts into Tally-style groups"""
+        account_type = account.account_type
+        name = (account.name or '').lower()
+        
+        # Income Classification
+        if account_type == 'income':
+            if any(x in name for x in ['sale', 'revenue', 'service income']):
+                return 'Sales Accounts'
+            return 'Direct Incomes'
+        
+        if account_type == 'income_other':
+            return 'Indirect Incomes'
+        
+        # Expense Classification
+        if account_type == 'expense_direct_cost':
+            if any(x in name for x in ['purchase', 'cost of goods', 'cogs']):
+                return 'Purchase Accounts'
+            return 'Direct Expenses'
+        
+        if account_type == 'expense':
+            if any(x in name for x in ['salary', 'wage', 'rent', 'utilities']):
+                return 'Direct Expenses'
+            return 'Direct Expenses'
+        
+        if account_type == 'expense_depreciation':
+            return 'Indirect Expenses'
+        
+        return 'Miscellaneous Expenses'
+
     def _get_period_balances(self, date_from, date_to, company_id):
         """
-        Calculate P&L from core journal items - TALLY STANDARD
-        Returns balances as NATURAL AMOUNTS (all positive):
-        - Income accounts: Positive (Credit balance)
-        - Expense accounts: Positive (Debit balance)
+        Calculate P&L from core journal items - NET BALANCES
+        Returns natural amounts (positive values)
         """
         balances = defaultdict(float)
         
-        # Define P&L account types
         pl_account_types = [
             'income', 'income_other', 
             'expense_direct_cost', 'expense', 'expense_depreciation'
         ]
         
-        # Find all relevant accounts
         accounts = self.env['account.account'].search([
             ('account_type', 'in', pl_account_types),
             ('company_id', '=', company_id.id)
         ])
+        
         if not accounts:
             return balances
 
-        # Create a map of account_id to its type
         account_type_map = {acc.id: acc.account_type for acc in accounts}
         
-        # Domain for all posted journal items *within the period*
         domain = [
             ('move_id.state', '=', 'posted'),
             ('date', '>=', date_from),
@@ -59,17 +84,14 @@ class ProfitLossWizard(models.TransientModel):
             ('account_id', 'in', accounts.ids)
         ]
 
-        # Use read_group to sum debit and credit by account
         read_group_result = self.env['account.move.line'].read_group(
             domain,
             ['debit', 'credit', 'account_id'],
             ['account_id']
         )
         
-        # Income types (natural credit balance)
         income_types = ('income', 'income_other')
 
-        # Calculate natural balances
         for res in read_group_result:
             if not res['account_id']:
                 continue
@@ -84,167 +106,177 @@ class ProfitLossWizard(models.TransientModel):
             credit = res['credit'] or 0.0
 
             if account_type in income_types:
-                # Income: Natural balance is Credit - Debit
                 balances[account_id] = credit - debit
             else:
-                # Expense: Natural balance is Debit - Credit
                 balances[account_id] = debit - credit
 
         return balances
 
     def _prepare_report_lines(self):
-        """Prepare P&L in Tally standard format with CLEAR POSITIVE VALUES"""
+        """Prepare P&L in Tally standard format"""
         self.ensure_one()
         self.line_ids.unlink()
-        lines = []
-        sequence = 0
-
-        Account = self.env['account.account']
+        
         period_balances = self._get_period_balances(
             self.start_date, self.end_date, self.company_id
         )
-
-        def _create_lines_for_type(account_types, level):
-            """Helper to generate line data - returns POSITIVE amounts"""
-            account_lines = []
-            group_total = 0.0
+        
+        if not period_balances:
+            # Create empty report with zero net result
+            self.env['tally.profit.loss.line'].create([{
+                'wizard_id': self.id,
+                'sequence': 10,
+                'level': 0,
+                'name': 'No transactions in this period',
+                'amount': 0.0,
+                'is_group': False,
+                'is_net_result': False,
+            }])
+            return
+        
+        all_accounts = self.env['account.account'].browse(period_balances.keys())
+        
+        # Group accounts
+        accounts_by_group = defaultdict(lambda: self.env['account.account'])
+        
+        for account in all_accounts:
+            group_name = self._classify_pl_account_to_tally_group(account)
+            accounts_by_group[group_name] |= account
+        
+        # Tally P&L Group Order (Expenses on left, Income on right in traditional format)
+        expense_groups = [
+            'Purchase Accounts',
+            'Direct Expenses',
+            'Indirect Expenses',
+            'Miscellaneous Expenses'
+        ]
+        
+        income_groups = [
+            'Sales Accounts',
+            'Direct Incomes',
+            'Indirect Incomes'
+        ]
+        
+        lines = []
+        sequence = 0
+        
+        total_expenses = 0.0
+        total_income = 0.0
+        
+        # Process Expense Groups
+        for group_name in expense_groups:
+            accounts = accounts_by_group.get(group_name)
+            if not accounts:
+                continue
             
-            accounts = Account.search([
-                ('account_type', 'in', account_types),
-                ('company_id', '=', self.company_id.id)
-            ])
+            group_total = 0.0
+            group_lines = []
             
             for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
                 balance = period_balances.get(account.id, 0.0)
+                
                 if abs(balance) < 0.01:
                     continue
                 
-                account_lines.append({
-                    'level': level,
-                    'name': f"{'  ' * level}{account.name} ({account.code or 'N/A'})",
+                group_lines.append({
+                    'level': 1,
+                    'name': f"  {account.name}",
                     'code': account.code,
-                    'amount': abs(balance),  # Always positive
+                    'amount': abs(balance),
                     'is_group': False,
                     'is_total': False,
                 })
+                
                 group_total += abs(balance)
             
-            return account_lines, group_total
-
-        # === EXPENSE SIDE (LEFT/DEBIT SIDE IN TALLY) ===
+            if group_lines:
+                sequence += 10
+                lines.append({
+                    'wizard_id': self.id,
+                    'sequence': sequence,
+                    'level': 0,
+                    'name': group_name,
+                    'amount': group_total,
+                    'is_group': True,
+                })
+                
+                for line_vals in group_lines:
+                    sequence += 10
+                    line_vals.update({
+                        'wizard_id': self.id,
+                        'sequence': sequence
+                    })
+                    lines.append(line_vals)
+                
+                total_expenses += group_total
         
-        # Purchase Accounts (COGS)
-        sequence += 10
-        lines.append({
-            'wizard_id': self.id, 'sequence': sequence, 'level': 0,
-            'name': 'Purchase Accounts', 'is_group': True, 'amount': 0.0,
-        })
-        purchase_idx = len(lines) - 1
+        # Process Income Groups
+        for group_name in income_groups:
+            accounts = accounts_by_group.get(group_name)
+            if not accounts:
+                continue
+            
+            group_total = 0.0
+            group_lines = []
+            
+            for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
+                balance = period_balances.get(account.id, 0.0)
+                
+                if abs(balance) < 0.01:
+                    continue
+                
+                group_lines.append({
+                    'level': 1,
+                    'name': f"  {account.name}",
+                    'code': account.code,
+                    'amount': abs(balance),
+                    'is_group': False,
+                    'is_total': False,
+                })
+                
+                group_total += abs(balance)
+            
+            if group_lines:
+                sequence += 10
+                lines.append({
+                    'wizard_id': self.id,
+                    'sequence': sequence,
+                    'level': 0,
+                    'name': group_name,
+                    'amount': group_total,
+                    'is_group': True,
+                })
+                
+                for line_vals in group_lines:
+                    sequence += 10
+                    line_vals.update({
+                        'wizard_id': self.id,
+                        'sequence': sequence
+                    })
+                    lines.append(line_vals)
+                
+                total_income += group_total
         
-        account_lines, purchase_total = _create_lines_for_type(['expense_direct_cost'], 1)
-        for line_vals in account_lines:
-            sequence += 10
-            line_vals.update({'wizard_id': self.id, 'sequence': sequence})
-            lines.append(line_vals)
-        lines[purchase_idx]['amount'] = purchase_total
-
-        # Direct Expenses
-        sequence += 10
-        lines.append({
-            'wizard_id': self.id, 'sequence': sequence, 'level': 0,
-            'name': 'Direct Expenses', 'is_group': True, 'amount': 0.0,
-        })
-        direct_exp_idx = len(lines) - 1
-        
-        account_lines, direct_exp_total = _create_lines_for_type(['expense'], 1)
-        for line_vals in account_lines:
-            sequence += 10
-            line_vals.update({'wizard_id': self.id, 'sequence': sequence})
-            lines.append(line_vals)
-        lines[direct_exp_idx]['amount'] = direct_exp_total
-
-        # Indirect Expenses
-        sequence += 10
-        lines.append({
-            'wizard_id': self.id, 'sequence': sequence, 'level': 0,
-            'name': 'Indirect Expenses', 'is_group': True, 'amount': 0.0,
-        })
-        indirect_exp_idx = len(lines) - 1
-        
-        account_lines, indirect_exp_total = _create_lines_for_type(['expense_depreciation'], 1)
-        for line_vals in account_lines:
-            sequence += 10
-            line_vals.update({'wizard_id': self.id, 'sequence': sequence})
-            lines.append(line_vals)
-        lines[indirect_exp_idx]['amount'] = indirect_exp_total
-
-        # Total Expenses
-        total_expenses = purchase_total + direct_exp_total + indirect_exp_total
-        
-        # === INCOME SIDE (RIGHT/CREDIT SIDE IN TALLY) ===
-        
-        # Sales Accounts
-        sequence += 10
-        lines.append({
-            'wizard_id': self.id, 'sequence': sequence, 'level': 0,
-            'name': 'Sales Accounts', 'is_group': True, 'amount': 0.0,
-        })
-        sales_idx = len(lines) - 1
-        
-        account_lines, sales_total = _create_lines_for_type(['income'], 1)
-        for line_vals in account_lines:
-            sequence += 10
-            line_vals.update({'wizard_id': self.id, 'sequence': sequence})
-            lines.append(line_vals)
-        lines[sales_idx]['amount'] = sales_total
-
-        # Direct Incomes
-        sequence += 10
-        lines.append({
-            'wizard_id': self.id, 'sequence': sequence, 'level': 0,
-            'name': 'Direct Incomes', 'is_group': True, 'amount': 0.0,
-        })
-        # Note: No 'direct_income' type by default, add accounts if needed
-
-        # Indirect Incomes
-        sequence += 10
-        lines.append({
-            'wizard_id': self.id, 'sequence': sequence, 'level': 0,
-            'name': 'Indirect Incomes', 'is_group': True, 'amount': 0.0,
-        })
-        indirect_inc_idx = len(lines) - 1
-        
-        account_lines, indirect_income_total = _create_lines_for_type(['income_other'], 1)
-        for line_vals in account_lines:
-            sequence += 10
-            line_vals.update({'wizard_id': self.id, 'sequence': sequence})
-            lines.append(line_vals)
-        lines[indirect_inc_idx]['amount'] = indirect_income_total
-
-        # Total Income
-        total_income = sales_total + indirect_income_total
-
-        # === NET PROFIT/LOSS (TALLY STANDARD CALCULATION) ===
-        # Both are POSITIVE values now
-        # Net Profit = Total Income - Total Expenses
-        # If Income > Expenses = Profit (shown on Debit/Expense side to balance)
-        # If Expenses > Income = Loss (shown on Credit/Income side to balance)
-        
+        # Net Profit/Loss
         net_result = total_income - total_expenses
         
         sequence += 10
-        if net_result >= 0:  # PROFIT
-            # Profit is shown on DEBIT side (Expense side) in Tally
+        if net_result >= 0:
             lines.append({
-                'wizard_id': self.id, 'sequence': sequence, 'level': 0,
-                'name': 'Net Profit', 'amount': net_result,
+                'wizard_id': self.id,
+                'sequence': sequence,
+                'level': 0,
+                'name': 'Net Profit',
+                'amount': net_result,
                 'is_net_result': True,
             })
-        else:  # LOSS
-            # Loss is shown on CREDIT side (Income side) in Tally
+        else:
             lines.append({
-                'wizard_id': self.id, 'sequence': sequence, 'level': 0,
-                'name': 'Net Loss', 'amount': abs(net_result),
+                'wizard_id': self.id,
+                'sequence': sequence,
+                'level': 0,
+                'name': 'Net Loss',
+                'amount': abs(net_result),
                 'is_net_result': True,
             })
 
