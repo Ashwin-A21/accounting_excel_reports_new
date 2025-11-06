@@ -26,75 +26,66 @@ class TrialBalanceWizard(models.TransientModel):
 
     def _classify_account_to_tally_group(self, account):
         """
-        Classify accounts into Tally-style groups based on account type and name
-        This matches Tally's standard grouping logic
+        Intelligently classify accounts into Tally-style groups
+        Based on account type, nature, and reconciliation settings
         """
         account_type = account.account_type
         code = (account.code or '').strip()
         name = (account.name or '').lower()
         
-        # === RECEIVABLES (Debtors) ===
-        if account.account_type == 'asset_receivable':
-            return 'Sundry Debtors'
+        # Receivables → Sundry Debtors
+        if account.account_type == 'asset_receivable' or account.reconcile:
+            if 'receivable' in name or 'debtor' in name or 'customer' in name:
+                return 'Sundry Debtors'
         
-        # === PAYABLES (Creditors) ===
-        if account.account_type == 'liability_payable':
-            return 'Sundry Creditors'
+        # Payables → Sundry Creditors
+        if account.account_type == 'liability_payable' or account.reconcile:
+            if 'payable' in name or 'creditor' in name or 'supplier' in name or 'vendor' in name:
+                return 'Sundry Creditors'
         
-        # === CASH & BANK ===
-        if account_type == 'asset_cash':
-            if 'cash' in name or 'petty' in name:
-                return 'Cash-in-Hand'
-            if 'bank' in name:
-                return 'Bank Accounts'
-            return 'Cash-in-Hand'
+        # Cash & Bank
+        if account_type in ('asset_cash', 'asset_current'):
+            if any(x in name for x in ['cash', 'bank', 'petty']):
+                return 'Cash-in-Hand' if 'cash' in name or 'petty' in name else 'Bank Accounts'
         
-        # === EQUITY (Capital) ===
+        # Capital Account (Equity)
         if account_type in ('equity', 'equity_unaffected'):
             return 'Capital Account'
         
-        # === CURRENT LIABILITIES ===
+        # Current Liabilities
         if account_type in ('liability_current', 'liability_credit_card'):
-            if any(x in name for x in ['tax', 'gst', 'vat', 'tds', 'duty']):
+            if 'tax' in name or 'gst' in name or 'vat' in name:
                 return 'Duties & Taxes'
-            if 'provision' in name:
-                return 'Provisions'
             return 'Current Liabilities'
         
-        # === LOANS ===
+        # Loans
         if account_type == 'liability_non_current':
-            if any(x in name for x in ['loan', 'borrowing', 'debt']):
+            if 'loan' in name or 'borrowing' in name:
                 return 'Loans (Liability)'
             return 'Current Liabilities'
         
-        # === FIXED ASSETS ===
+        # Fixed Assets
         if account_type in ('asset_fixed', 'asset_non_current'):
             return 'Fixed Assets'
         
-        # === CURRENT ASSETS ===
+        # Current Assets
         if account_type in ('asset_current', 'asset_prepayment'):
-            if any(x in name for x in ['inventory', 'stock']):
+            if 'inventory' in name or 'stock' in name:
                 return 'Stock-in-Hand'
-            if any(x in name for x in ['deposit', 'advance', 'prepaid']):
+            if 'deposit' in name or 'advance' in name:
                 return 'Deposits (Asset)'
-            if 'bank' in name:
-                return 'Bank Accounts'
             return 'Current Assets'
         
-        # === INCOME ===
+        # Income accounts
         if account_type == 'income':
-            if any(x in name for x in ['sale', 'revenue', 'service income']):
-                return 'Sales Accounts'
-            return 'Direct Incomes'
+            return 'Sales Accounts'
         
         if account_type == 'income_other':
             return 'Indirect Incomes'
         
-        # === EXPENSES ===
+        # Expense accounts
         if account_type == 'expense_direct_cost':
-            if any(x in name for x in ['purchase', 'cost of goods', 'cogs']):
-                return 'Purchase Accounts'
-            return 'Direct Expenses'
+            return 'Purchase Accounts'
         
         if account_type == 'expense':
             return 'Direct Expenses'
@@ -107,52 +98,17 @@ class TrialBalanceWizard(models.TransientModel):
     def _get_account_balances(self, date_to, company_id):
         """
         Calculate NET account balances from journal items
-        IMPROVED LOGIC - Check actual outstanding via amount_residual:
-        - Receivables/Payables: Use amount_residual (shows actual unpaid amounts)
-        - All other accounts: ALL posted transactions (complete balances)
-        
-        This is more accurate than checking reconcile flag
+        For reconcilable accounts (Debtors/Creditors), only unreconciled items count
         """
         balances = defaultdict(float)
         
-        # Get all accounts except off-balance
+        # Get all accounts
         all_accounts = self.env['account.account'].search([
             ('company_id', '=', company_id.id),
             ('account_type', '!=', 'off_balance')
         ])
         
-        # Separate receivables/payables from other accounts
-        rec_pay_accounts = all_accounts.filtered(lambda a: a.account_type in ['asset_receivable', 'liability_payable'])
-        other_accounts = all_accounts - rec_pay_accounts
-        
-        # === HANDLE RECEIVABLES/PAYABLES - Check Outstanding via amount_residual ===
-        for account in rec_pay_accounts:
-            # Get invoice/bill lines that have amount_residual tracking
-            move_lines = self.env['account.move.line'].search([
-                ('account_id', '=', account.id),
-                ('move_id.state', '=', 'posted'),
-                ('date', '<=', date_to),
-                ('company_id', '=', company_id.id),
-                ('move_id.move_type', 'in', ['out_invoice', 'in_invoice', 'out_refund', 'in_refund', 'out_receipt', 'in_receipt']),
-            ])
-            
-            outstanding_total = 0.0
-            for line in move_lines:
-                # amount_residual shows unpaid amount
-                # Positive for receivables, negative for payables
-                if hasattr(line, 'amount_residual_currency'):
-                    residual = line.amount_residual_currency or line.amount_residual
-                else:
-                    residual = line.amount_residual
-                
-                if abs(residual) > 0.01:
-                    outstanding_total += residual
-            
-            if abs(outstanding_total) > 0.01:
-                balances[account.id] = outstanding_total
-        
-        # === HANDLE OTHER ACCOUNTS - Complete Balances ===
-        for account in other_accounts:
+        for account in all_accounts:
             domain = [
                 ('account_id', '=', account.id),
                 ('move_id.state', '=', 'posted'),
@@ -160,7 +116,11 @@ class TrialBalanceWizard(models.TransientModel):
                 ('company_id', '=', company_id.id)
             ]
             
-            # Use read_group for efficient aggregation
+            # For reconcilable accounts (Debtors/Creditors), only count unreconciled items
+            if account.reconcile:
+                domain.append(('reconciled', '=', False))
+            
+            # Sum using read_group
             result = self.env['account.move.line'].read_group(
                 domain,
                 ['debit', 'credit'],
@@ -172,34 +132,19 @@ class TrialBalanceWizard(models.TransientModel):
                 credit = result[0].get('credit', 0.0)
                 balance = debit - credit
                 
-                # Only include accounts with material balance
                 if abs(balance) >= 0.01:
                     balances[account.id] = balance
         
         return balances
 
     def _prepare_report_lines(self):
-        """
-        Prepare Trial Balance in Tally standard format with intelligent grouping
-        Follows Tally's presentation: Groups with totals, then individual accounts
-        """
+        """Prepare Trial Balance in Tally standard format with intelligent grouping"""
         self.ensure_one()
         self.line_ids.unlink()
         
         account_balances = self._get_account_balances(self.end_date, self.company_id)
         
         if not account_balances:
-            # No transactions - create empty report
-            self.env['tally.trial.balance.line'].create([{
-                'wizard_id': self.id,
-                'sequence': 10,
-                'level': 0,
-                'name': 'No transactions in this period',
-                'debit': 0.0,
-                'credit': 0.0,
-                'is_group': False,
-                'is_total': False,
-            }])
             return
         
         all_accounts = self.env['account.account'].browse(account_balances.keys())
@@ -211,16 +156,13 @@ class TrialBalanceWizard(models.TransientModel):
             group_name = self._classify_account_to_tally_group(account)
             accounts_by_group[group_name] |= account
         
-        # Tally Standard Group Order (Liabilities, Assets, Income, Expenses)
+        # Tally Standard Group Order
         group_order = [
-            # Liabilities
             'Capital Account',
             'Current Liabilities',
             'Loans (Liability)',
             'Sundry Creditors',
             'Duties & Taxes',
-            'Provisions',
-            # Assets
             'Fixed Assets',
             'Current Assets',
             'Stock-in-Hand',
@@ -228,15 +170,11 @@ class TrialBalanceWizard(models.TransientModel):
             'Cash-in-Hand',
             'Bank Accounts',
             'Deposits (Asset)',
-            # Income
             'Sales Accounts',
-            'Direct Incomes',
-            'Indirect Incomes',
-            # Expenses
             'Purchase Accounts',
             'Direct Expenses',
             'Indirect Expenses',
-            # Other
+            'Indirect Incomes',
             'Miscellaneous'
         ]
         
@@ -254,14 +192,12 @@ class TrialBalanceWizard(models.TransientModel):
             group_credit_total = 0.0
             group_lines = []
             
-            # Process each account in the group
             for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
                 balance = account_balances.get(account.id, 0.0)
                 
                 if abs(balance) < 0.01:
                     continue
                 
-                # Split balance into debit/credit for trial balance display
                 debit = balance if balance > 0 else 0.0
                 credit = abs(balance) if balance < 0 else 0.0
                 
@@ -278,7 +214,7 @@ class TrialBalanceWizard(models.TransientModel):
                 group_credit_total += credit
             
             if group_lines:
-                # Add group header with totals
+                # Add group header
                 sequence += 10
                 lines.append({
                     'wizard_id': self.id,
@@ -291,7 +227,7 @@ class TrialBalanceWizard(models.TransientModel):
                     'is_total': False,
                 })
                 
-                # Add individual account lines under the group
+                # Add account lines
                 for line_vals in group_lines:
                     sequence += 10
                     line_vals.update({
@@ -303,7 +239,7 @@ class TrialBalanceWizard(models.TransientModel):
                 grand_total_debit += group_debit_total
                 grand_total_credit += group_credit_total
         
-        # Grand Total (must always balance in a proper Trial Balance)
+        # Grand Total
         sequence += 10
         lines.append({
             'wizard_id': self.id,
@@ -333,7 +269,6 @@ class TrialBalanceWizard(models.TransientModel):
         workbook = xlsxwriter.Workbook(output, {'in_memory': True})
         worksheet = workbook.add_worksheet('Trial Balance')
 
-        # Excel formats matching Tally style
         formats = {
             'title': workbook.add_format({
                 'bold': True, 'font_size': 14, 'align': 'center', 'font_name': 'Arial'
@@ -366,23 +301,19 @@ class TrialBalanceWizard(models.TransientModel):
             }),
         }
 
-        # Header section
         worksheet.merge_range('A1:C1', self.company_id.name, formats['title'])
         worksheet.merge_range('A2:C2', 'Trial Balance', formats['title'])
         worksheet.merge_range('A3:C3', f'As on {self.end_date.strftime("%d-%b-%Y")}', formats['subtitle'])
 
-        # Column widths
         worksheet.set_column('A:A', 50)
         worksheet.set_column('B:B', 18)
         worksheet.set_column('C:C', 18)
 
-        # Column headers
         row = 4
         worksheet.write(row, 0, 'Particulars', formats['header'])
         worksheet.write(row, 1, 'Debit', formats['header'])
         worksheet.write(row, 2, 'Credit', formats['header'])
 
-        # Data rows
         row = 5
         for line in self.line_ids:
             if line.is_total:
