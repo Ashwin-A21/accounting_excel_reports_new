@@ -162,7 +162,7 @@
                                     
                                     <td class="text-right">
                                         <span t-if="line.amount or line.is_group or line.is_net_result" 
-                                              t-esc="abs(line.amount)" 
+                                              t-esc="line.amount" 
                                               t-options="{'widget': 'monetary', 'display_currency': docs.company_id.currency_id}"/>
                                     </td>
                                 </tr>
@@ -200,7 +200,7 @@
                                 
                                 <td class="text-right">
                                     <span t-if="abs(line.amount) > 0.01 or line.is_group or line.is_total" 
-                                          t-esc="line.amount if line.amount >= 0 else -line.amount" 
+                                          t-esc="line.amount" 
                                           t-options="{'widget': 'monetary', 'display_currency': docs.company_id.currency_id}"/>
                                 </td>
                             </tr>
@@ -236,7 +236,7 @@
                                     <td t-esc="line.name"/>
                                     <td class="text-right">
                                         <span t-if="line.amount or line.is_group or line.is_total" 
-                                              t-esc="abs(line.amount)" 
+                                              t-esc="line.amount" 
                                               t-options="{'widget': 'monetary', 'display_currency': docs.company_id.currency_id}"/>
                                     </td>
                                 </tr>
@@ -256,7 +256,7 @@
                                     <td t-esc="line.name"/>
                                     <td class="text-right">
                                         <span t-if="line.amount or line.is_group or line.is_total" 
-                                              t-esc="abs(line.amount)" 
+                                              t-esc="line.amount" 
                                               t-options="{'widget': 'monetary', 'display_currency': docs.company_id.currency_id}"/>
                                     </td>
                                 </tr>

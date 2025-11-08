@@ -1,6 +1,6 @@
 {
     'name': 'Accounting Excel Reports',
-    'version': '17.0.2.0.0', # Incremented version
+    'version': '17.0.2.2.0', # Incremented version
     'category': 'Accounting',
     'summary': 'Generate Excel and View Tally-style reports for Trial Balance, Balance Sheet, and P&L',
     'description': """
@@ -17,6 +17,11 @@
           for all accounts, ignoring reconciliation status. This fixes bugs
           related to paid/unpaid entries showing incorrect balances.
         - Corrects horizontal Balance Sheet total calculations.
+        
+        New in 2.2.0:
+        - Fixes QWeb report templates (Balance Sheet and P&L) to correctly
+          display negative numbers (e.g., for suspense accounts or debit-balance
+          liabilities) instead of forcing them to be positive with abs().
     """,
     'author': 'Concept Solutions ',
     'website': 'https://www.csloman.com',
