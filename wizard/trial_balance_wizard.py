@@ -26,79 +26,80 @@ class TrialBalanceWizard(models.TransientModel):
 
     def _classify_account_to_tally_group(self, account):
         """
-        Intelligently classify accounts into Tally-style groups
-        Based on account type, nature, and reconciliation settings
+        Standalone Tally Classification
+        Classifies accounts based on name, ignoring Odoo's COA type setup.
         """
-        account_type = account.account_type
-        code = (account.code or '').strip()
         name = (account.name or '').lower()
-        
-        # Receivables → Sundry Debtors
-        if account.account_type == 'asset_receivable' or account.reconcile:
-            if 'receivable' in name or 'debtor' in name or 'customer' in name:
-                return 'Sundry Debtors'
-        
-        # Payables → Sundry Creditors
-        if account.account_type == 'liability_payable' or account.reconcile:
-            if 'payable' in name or 'creditor' in name or 'supplier' in name or 'vendor' in name:
-                return 'Sundry Creditors'
-        
-        # Cash & Bank
-        if account_type in ('asset_cash', 'asset_current'):
-            if any(x in name for x in ['cash', 'bank', 'petty']):
-                return 'Cash-in-Hand' if 'cash' in name or 'petty' in name else 'Bank Accounts'
-        
-        # Capital Account (Equity)
-        if account_type in ('equity', 'equity_unaffected'):
+        acc_type = account.account_type # Use as a fallback
+
+        # Priority 1: Name-based checks (Tally-first logic)
+        if any(x in name for x in ['debtor', 'receivable', 'customer']):
+            return 'Sundry Debtors'
+        if any(x in name for x in ['creditor', 'payable', 'supplier', 'vendor']):
+            return 'Sundry Creditors'
+        if 'bank' in name:
+            return 'Bank Accounts'
+        if 'cash' in name or 'petty' in name:
+            return 'Cash-in-Hand'
+        if 'capital' in name:
             return 'Capital Account'
-        
-        # Current Liabilities
-        if account_type in ('liability_current', 'liability_credit_card'):
-            if 'tax' in name or 'gst' in name or 'vat' in name:
-                return 'Duties & Taxes'
-            return 'Current Liabilities'
-        
-        # Loans
-        if account_type == 'liability_non_current':
-            if 'loan' in name or 'borrowing' in name:
-                return 'Loans (Liability)'
-            return 'Current Liabilities'
-        
-        # Fixed Assets
-        if account_type in ('asset_fixed', 'asset_non_current'):
+        if any(x in name for x in ['tax', 'gst', 'vat', 'tds']):
+            return 'Duties & Taxes'
+        if any(x in name for x in ['loan', 'borrowing']):
+            return 'Loans (Liability)'
+        if any(x in name for x in ['fixed asset', 'building', 'vehicle', 'machinery', 'furniture']):
             return 'Fixed Assets'
-        
-        # Current Assets
-        if account_type in ('asset_current', 'asset_prepayment'):
-            if 'inventory' in name or 'stock' in name:
-                return 'Stock-in-Hand'
-            if 'deposit' in name or 'advance' in name:
-                return 'Deposits (Asset)'
-            return 'Current Assets'
-        
-        # Income accounts
-        if account_type == 'income':
+        if any(x in name for x in ['inventory', 'stock']):
+            return 'Stock-in-Hand'
+        if any(x in name for x in ['deposit', 'prepaid', 'prepayment']):
+            return 'Deposits (Asset)'
+        if any(x in name for x in ['sale', 'revenue', 'service']):
             return 'Sales Accounts'
-        
-        if account_type == 'income_other':
-            return 'Indirect Incomes'
-        
-        # Expense accounts
-        if account_type == 'expense_direct_cost':
+        if 'purchase' in name:
             return 'Purchase Accounts'
+            
+        # --- FIX: Classify outstanding accounts explicitly ---
+        if 'outstanding payment' in name:
+            return 'Current Liabilities'
+        if 'outstanding receipt' in name:
+            return 'Current Assets'
+        # --- END FIX ---
         
-        if account_type == 'expense':
+        # Priority 2: Odoo Type fallback
+        if acc_type == 'asset_receivable':
+            return 'Sundry Debtors'
+        if acc_type == 'liability_payable':
+            return 'Sundry Creditors'
+        if acc_type in ('asset_cash', 'asset_current'):
+            if 'bank' in name: return 'Bank Accounts'
+            if 'cash' in name: return 'Cash-in-Hand'
+            return 'Current Assets'
+        if acc_type in ('equity', 'equity_unaffected'):
+            return 'Capital Account'
+        if acc_type in ('liability_current', 'liability_credit_card'):
+            return 'Current Liabilities'
+        if acc_type == 'liability_non_current':
+            return 'Loans (Liability)'
+        if acc_type in ('asset_fixed', 'asset_non_current'):
+            return 'Fixed Assets'
+        if acc_type == 'asset_prepayment':
+            return 'Current Assets'
+        if acc_type == 'income':
+            return 'Sales Accounts'
+        if acc_type == 'income_other':
+            return 'Indirect Incomes'
+        if acc_type == 'expense_direct_cost':
             return 'Direct Expenses'
-        
-        if account_type == 'expense_depreciation':
+        if acc_type in ('expense', 'expense_depreciation'):
             return 'Indirect Expenses'
         
         return 'Miscellaneous'
 
     def _get_account_balances(self, date_to, company_id):
         """
-        Calculate NET account balances from journal items
-        For reconcilable accounts (Debtors/Creditors), only unreconciled items count
+        Calculate NET account balances (Debit - Credit) from journal items.
+        This IGNORES the 'reconciled' status and calculates the true
+        closing balance, which is the correct Tally logic.
         """
         balances = defaultdict(float)
         
@@ -108,32 +109,33 @@ class TrialBalanceWizard(models.TransientModel):
             ('account_type', '!=', 'off_balance')
         ])
         
-        for account in all_accounts:
-            domain = [
-                ('account_id', '=', account.id),
-                ('move_id.state', '=', 'posted'),
-                ('date', '<=', date_to),
-                ('company_id', '=', company_id.id)
-            ]
+        if not all_accounts:
+            return balances
+
+        # Use read_group for performance
+        domain = [
+            ('account_id', 'in', all_accounts.ids),
+            ('move_id.state', '=', 'posted'),
+            ('date', '<=', date_to),
+            ('company_id', '=', company_id.id)
+        ]
+        
+        result_data = self.env['account.move.line'].read_group(
+            domain,
+            ['debit', 'credit', 'account_id'],
+            ['account_id']
+        )
+        
+        for res in result_data:
+            if not res['account_id']:
+                continue
             
-            # For reconcilable accounts (Debtors/Creditors), only count unreconciled items
-            if account.reconcile:
-                domain.append(('reconciled', '=', False))
+            debit = res.get('debit', 0.0)
+            credit = res.get('credit', 0.0)
+            balance = debit - credit
             
-            # Sum using read_group
-            result = self.env['account.move.line'].read_group(
-                domain,
-                ['debit', 'credit'],
-                []
-            )
-            
-            if result:
-                debit = result[0].get('debit', 0.0)
-                credit = result[0].get('credit', 0.0)
-                balance = debit - credit
-                
-                if abs(balance) >= 0.01:
-                    balances[account.id] = balance
+            if abs(balance) >= 0.01:
+                balances[res['account_id'][0]] = balance
         
         return balances
 
@@ -142,6 +144,7 @@ class TrialBalanceWizard(models.TransientModel):
         self.ensure_one()
         self.line_ids.unlink()
         
+        # Get the true net balances
         account_balances = self._get_account_balances(self.end_date, self.company_id)
         
         if not account_balances:
@@ -153,23 +156,24 @@ class TrialBalanceWizard(models.TransientModel):
         accounts_by_group = defaultdict(lambda: self.env['account.account'])
         
         for account in all_accounts:
+            # Use the new standalone classifier
             group_name = self._classify_account_to_tally_group(account)
             accounts_by_group[group_name] |= account
         
         # Tally Standard Group Order
         group_order = [
             'Capital Account',
-            'Current Liabilities',
             'Loans (Liability)',
+            'Current Liabilities',
             'Sundry Creditors',
             'Duties & Taxes',
             'Fixed Assets',
             'Current Assets',
             'Stock-in-Hand',
+            'Deposits (Asset)',
             'Sundry Debtors',
             'Cash-in-Hand',
             'Bank Accounts',
-            'Deposits (Asset)',
             'Sales Accounts',
             'Purchase Accounts',
             'Direct Expenses',

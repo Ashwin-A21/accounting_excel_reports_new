@@ -1,6 +1,6 @@
 {
     'name': 'Accounting Excel Reports',
-    'version': '17.0.1.3.0', # Incremented version
+    'version': '17.0.2.0.0', # Incremented version
     'category': 'Accounting',
     'summary': 'Generate Excel and View Tally-style reports for Trial Balance, Balance Sheet, and P&L',
     'description': """
@@ -9,12 +9,14 @@
         - Balance Sheet (Tally Format)
         - Profit & Loss Account (Tally Format)
         
-        Uses Odoo's core account.move.line calculations for accuracy
-        and Tally-style grouping.
-        
-        New in 1.3.0:
-        - Refactored balance calculation to use account.move.line read_group
-          for accuracy and performance, removing manual source document parsing.
+        New in 2.0.0:
+        - Implements "Standalone" Tally classification logic.
+        - Ignores client's Chart of Account types and classifies based on account names 
+          (e.g., 'bank', 'sales', 'sundry creditor') for consistent Tally grouping.
+        - Fixes balance calculation to use true net balance (Debit - Credit) 
+          for all accounts, ignoring reconciliation status. This fixes bugs
+          related to paid/unpaid entries showing incorrect balances.
+        - Corrects horizontal Balance Sheet total calculations.
     """,
     'author': 'Concept Solutions ',
     'website': 'https://www.csloman.com',

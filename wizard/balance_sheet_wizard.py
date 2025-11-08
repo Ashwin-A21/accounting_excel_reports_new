@@ -21,57 +21,84 @@ class BalanceSheetWizard(models.TransientModel):
     asset_line_ids = fields.One2many('tally.balance.sheet.line', 'wizard_asset_id', string='Asset Lines')
 
     def _classify_bs_account_to_tally_group(self, account):
-        """Classify Balance Sheet accounts into Tally-style groups"""
-        account_type = account.account_type
+        """
+        Standalone Tally Classification for Balance Sheet
+        This function IGNORES the Odoo COA type and uses Tally logic.
+        """
         name = (account.name or '').lower()
-        
-        # === LIABILITIES ===
-        if account_type in ('equity', 'equity_unaffected'):
+        acc_type = account.account_type # Use as a final fallback
+
+        # === LIABILITIES (Priority 1: Name Check) ===
+        if 'capital' in name:
             return 'Capital Account'
-        
-        if account_type == 'liability_payable' or account.reconcile:
-            if 'payable' in name or 'creditor' in name or 'supplier' in name:
-                return 'Sundry Creditors'
-        
-        if account_type in ('liability_current', 'liability_credit_card'):
-            if 'tax' in name or 'gst' in name or 'vat' in name:
-                return 'Duties & Taxes'
-            if 'provision' in name:
-                return 'Provisions'
+            
+        # --- FIX: 'outstanding payment' is a Current Liability, not a Sundry Creditor ---
+        if 'outstanding payment' in name:
             return 'Current Liabilities'
+        # --- END FIX ---
+
+        # 'outstanding payment' was removed from this list
+        if any(x in name for x in ['creditor', 'payable', 'supplier', 'vendor']):
+            return 'Sundry Creditors'
+        if any(x in name for x in ['tax', 'gst', 'vat', 'tds']):
+            return 'Duties & Taxes'
+        if any(x in name for x in ['loan', 'borrowing']):
+            return 'Loans (Liability)'
+        if 'provision' in name:
+            return 'Provisions'
+
+        # === ASSETS (Priority 1: Name Check) ===
         
-        if account_type == 'liability_non_current':
-            if 'loan' in name or 'borrowing' in name:
-                return 'Loans (Liability)'
-            return 'Current Liabilities'
-        
-        # === ASSETS ===
-        if account_type in ('asset_fixed', 'asset_non_current'):
-            return 'Fixed Assets'
-        
-        if account_type == 'asset_receivable' or account.reconcile:
-            if 'receivable' in name or 'debtor' in name or 'customer' in name:
-                return 'Sundry Debtors'
-        
-        if account_type == 'asset_cash':
-            if 'cash' in name or 'petty' in name:
-                return 'Cash-in-Hand'
-            return 'Bank Accounts'
-        
-        if account_type in ('asset_current', 'asset_prepayment'):
-            if 'inventory' in name or 'stock' in name:
-                return 'Stock-in-Hand'
-            if 'deposit' in name or 'advance' in name:
-                return 'Deposits (Asset)'
-            if 'bank' in name:
-                return 'Bank Accounts'
+        # --- FIX: Be explicit about 'outstanding receipt' ---
+        if 'outstanding receipt' in name:
             return 'Current Assets'
+        # --- END FIX ---
         
+        if any(x in name for x in ['debtor', 'receivable', 'customer']):
+            return 'Sundry Debtors'
+        if 'bank' in name:
+            return 'Bank Accounts'
+        if 'cash' in name or 'petty' in name:
+            return 'Cash-in-Hand'
+        if any(x in name for x in ['fixed asset', 'building', 'vehicle', 'machinery', 'furniture']):
+            return 'Fixed Assets'
+        if any(x in name for x in ['inventory', 'stock']):
+            return 'Stock-in-Hand'
+        if any(x in name for x in ['deposit', 'prepaid', 'prepayment', 'advance paid']):
+            return 'Deposits (Asset)'
+
+        # === Fallback (Priority 2: Odoo Type) ===
+        # This only runs if the name checks above fail
+        if acc_type in ('equity', 'equity_unaffected'):
+            return 'Capital Account'
+        if acc_type == 'liability_payable':
+            return 'Sundry Creditors'
+        if acc_type in ('liability_current', 'liability_credit_card'):
+            return 'Current Liabilities' # 'outstanding payment' will also fall back here
+        if acc_type == 'liability_non_current':
+            return 'Loans (Liability)'
+        if acc_type == 'asset_receivable':
+            return 'Sundry Debtors'
+        if acc_type in ('asset_fixed', 'asset_non_current'):
+            return 'Fixed Assets'
+        if acc_type == 'asset_cash':
+            return 'Bank Accounts'
+        if acc_type in ('asset_current', 'asset_prepayment'):
+            return 'Current Assets' # 'outstanding receipt' will also fall back here
+        
+        # Final Fallback
+        if acc_type.startswith('liability_'):
+            return 'Current Liabilities'
+        if acc_type.startswith('asset_'):
+            return 'Current Assets'
+            
         return 'Miscellaneous'
 
     def _get_closing_balances(self, date_to, company_id):
         """
-        Get closing balances - NET BALANCES for reconcilable accounts
+        Get closing balances - NET BALANCES (Debit - Credit) for all accounts.
+        This is the new logic that IGNORES 'reconciled' status, fixing
+        the "payment made but still showing" bug.
         """
         balances = defaultdict(float)
         
@@ -91,31 +118,30 @@ class BalanceSheetWizard(models.TransientModel):
         if not accounts:
             return balances
 
-        for account in accounts:
-            domain = [
-                ('account_id', '=', account.id),
-                ('move_id.state', '=', 'posted'),
-                ('date', '<=', date_to),
-                ('company_id', '=', company_id.id)
-            ]
-            
-            # For reconcilable accounts, only unreconciled items
-            if account.reconcile:
-                domain.append(('reconciled', '=', False))
-            
-            result = self.env['account.move.line'].read_group(
-                domain,
-                ['debit', 'credit'],
-                []
-            )
-            
-            if result:
-                debit = result[0].get('debit', 0.0)
-                credit = result[0].get('credit', 0.0)
-                balance = debit - credit
+        # Use read_group for performance
+        domain = [
+            ('account_id', 'in', accounts.ids),
+            ('move_id.state', '=', 'posted'),
+            ('date', '<=', date_to),
+            ('company_id', '=', company_id.id)
+        ]
+        
+        result_data = self.env['account.move.line'].read_group(
+            domain,
+            ['debit', 'credit', 'account_id'],
+            ['account_id']
+        )
+        
+        for res in result_data:
+            if not res['account_id']:
+                continue
                 
-                if abs(balance) >= 0.01:
-                    balances[account.id] = balance
+            debit = res.get('debit', 0.0)
+            credit = res.get('credit', 0.0)
+            balance = debit - credit # This is the true net balance
+            
+            if abs(balance) >= 0.01:
+                balances[res['account_id'][0]] = balance
         
         return balances
 
@@ -169,10 +195,13 @@ class BalanceSheetWizard(models.TransientModel):
             credit = res['credit'] or 0.0
 
             if account_type in income_types:
+                # Income is credit-positive
                 income_total += (credit - debit)
             else:
+                # Expense is debit-positive
                 expense_total += (debit - credit)
 
+        # Profit is Income - Expense
         return income_total - expense_total
 
     def _prepare_vertical_report_lines(self):
@@ -197,8 +226,8 @@ class BalanceSheetWizard(models.TransientModel):
         # Tally BS Group Order
         liability_groups = [
             'Capital Account',
-            'Current Liabilities',
             'Loans (Liability)',
+            'Current Liabilities',
             'Sundry Creditors',
             'Duties & Taxes',
             'Provisions'
@@ -208,10 +237,10 @@ class BalanceSheetWizard(models.TransientModel):
             'Fixed Assets',
             'Current Assets',
             'Stock-in-Hand',
+            'Deposits (Asset)',
             'Sundry Debtors',
             'Cash-in-Hand',
             'Bank Accounts',
-            'Deposits (Asset)',
             'Miscellaneous'
         ]
         
@@ -229,53 +258,44 @@ class BalanceSheetWizard(models.TransientModel):
         
         for group_name in liability_groups:
             accounts = accounts_by_group.get(group_name)
-            if not accounts:
-                if group_name == 'Capital Account':
-                    # Always show Capital Account even if empty
-                    sequence += 10
-                    lines.append({
-                        'wizard_id': self.id,
-                        'sequence': sequence,
-                        'level': 0,
-                        'name': group_name,
-                        'amount': 0.0,
-                        'is_group': True,
-                    })
-                continue
             
             group_total = 0.0
             group_lines = []
             
-            for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
-                balance = closing_balances.get(account.id, 0.0)
+            # Special case: Always show Capital Account
+            if not accounts and group_name != 'Capital Account':
+                continue
                 
-                if abs(balance) < 0.01:
-                    continue
-                
-                # For liabilities, we want credit balance (negative in our system)
-                # Convert to positive for display
-                amount = abs(balance)
-                
-                group_lines.append({
-                    'level': 1,
-                    'name': f"  {account.name}",
-                    'code': account.code,
-                    'amount': amount,
-                    'is_group': False,
-                })
-                
-                # For liability accounts, credit balance is normal
-                if balance < 0:
+            if accounts:
+                for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
+                    # balance = Debit - Credit
+                    balance = closing_balances.get(account.id, 0.0)
+                    
+                    if abs(balance) < 0.01:
+                        continue
+                    
+                    # For liabilities, display Credit balance (balance < 0) as positive
+                    amount = balance * -1
+                    
+                    group_lines.append({
+                        'level': 1,
+                        'name': f"  {account.name}",
+                        'code': account.code,
+                        'amount': amount,
+                        'is_group': False,
+                    })
+                    
                     group_total += amount
-                else:
-                    # Debit balance in liability account (unusual)
-                    group_total -= amount
             
             if group_lines or group_name == 'Capital Account':
                 sequence += 10
                 
                 # Add P&L to Capital Account
                 if group_name == 'Capital Account':
+                    # net_profit_loss is (Income - Expense)
+                    # A profit (positive) increases Liability/Capital
+                    # A loss (negative) decreases Liability/Capital
+                    # Our 'group_total' is positive, so add profit or subtract loss
                     group_total += net_profit_loss
                 
                 lines.append({
@@ -283,7 +303,7 @@ class BalanceSheetWizard(models.TransientModel):
                     'sequence': sequence,
                     'level': 0,
                     'name': group_name,
-                    'amount': abs(group_total),
+                    'amount': group_total,
                     'is_group': True,
                 })
                 
@@ -307,7 +327,7 @@ class BalanceSheetWizard(models.TransientModel):
                         'amount': abs(net_profit_loss),
                     })
                 
-                total_liabilities += abs(group_total)
+                total_liabilities += group_total
         
         # === ASSETS ===
         total_assets = 0.0
@@ -321,12 +341,14 @@ class BalanceSheetWizard(models.TransientModel):
             group_lines = []
             
             for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
+                # balance = Debit - Credit
                 balance = closing_balances.get(account.id, 0.0)
                 
                 if abs(balance) < 0.01:
                     continue
                 
-                amount = abs(balance)
+                # For assets, display Debit balance (balance > 0) as positive
+                amount = balance
                 
                 group_lines.append({
                     'level': 1,
@@ -336,12 +358,7 @@ class BalanceSheetWizard(models.TransientModel):
                     'is_group': False,
                 })
                 
-                # For asset accounts, debit balance is normal
-                if balance > 0:
-                    group_total += amount
-                else:
-                    # Credit balance in asset account (unusual)
-                    group_total -= amount
+                group_total += amount
             
             if group_lines:
                 sequence += 10
@@ -350,7 +367,7 @@ class BalanceSheetWizard(models.TransientModel):
                     'sequence': sequence,
                     'level': 0,
                     'name': group_name,
-                    'amount': abs(group_total),
+                    'amount': group_total,
                     'is_group': True,
                 })
                 
@@ -362,17 +379,26 @@ class BalanceSheetWizard(models.TransientModel):
                     })
                     lines.append(line_vals)
                 
-                total_assets += abs(group_total)
+                total_assets += group_total
         
         # Total
         sequence += 10
-        balance_total = max(total_liabilities, total_assets)
         lines.append({
             'wizard_id': self.id,
             'sequence': sequence,
             'level': 0,
-            'name': 'Total',
-            'amount': balance_total,
+            'name': 'Total (Liabilities)',
+            'amount': total_liabilities,
+            'is_total': True,
+        })
+        
+        sequence += 10
+        lines.append({
+            'wizard_id': self.id,
+            'sequence': sequence,
+            'level': 0,
+            'name': 'Total (Assets)',
+            'amount': total_assets,
             'is_total': True,
         })
 
@@ -399,8 +425,8 @@ class BalanceSheetWizard(models.TransientModel):
         
         liability_groups = [
             'Capital Account',
-            'Current Liabilities',
             'Loans (Liability)',
+            'Current Liabilities',
             'Sundry Creditors',
             'Duties & Taxes',
             'Provisions'
@@ -410,10 +436,10 @@ class BalanceSheetWizard(models.TransientModel):
             'Fixed Assets',
             'Current Assets',
             'Stock-in-Hand',
+            'Deposits (Asset)',
             'Sundry Debtors',
             'Cash-in-Hand',
             'Bank Accounts',
-            'Deposits (Asset)',
             'Miscellaneous'
         ]
         
@@ -432,55 +458,35 @@ class BalanceSheetWizard(models.TransientModel):
         # Process Liabilities
         for group_name in liability_groups:
             accounts = accounts_by_group.get(group_name)
-            if not accounts:
-                if group_name == 'Capital Account':
-                    liab_seq += 10
-                    liab_lines.append({
-                        'wizard_liab_id': self.id,
-                        'sequence': liab_seq,
-                        'level': 0,
-                        'name': group_name,
-                        'amount': abs(net_profit_loss),
-                        'is_group': True,
-                    })
-                    
-                    if abs(net_profit_loss) > 0.01:
-                        liab_seq += 10
-                        pl_name = "  Net Profit" if net_profit_loss >= 0 else "  Net Loss"
-                        liab_lines.append({
-                            'wizard_liab_id': self.id,
-                            'sequence': liab_seq,
-                            'level': 1,
-                            'name': pl_name,
-                            'amount': abs(net_profit_loss),
-                        })
-                    
-                    total_liabilities += abs(net_profit_loss)
-                continue
             
             group_total = 0.0
             group_lines = []
+
+            # Special case: Always show Capital Account
+            if not accounts and group_name != 'Capital Account':
+                continue
             
-            for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
-                balance = closing_balances.get(account.id, 0.0)
-                
-                if abs(balance) < 0.01:
-                    continue
-                
-                amount = abs(balance)
-                
-                group_lines.append({
-                    'level': 1,
-                    'name': f"  {account.name}",
-                    'code': account.code,
-                    'amount': amount,
-                    'is_group': False,
-                })
-                
-                if balance < 0:
+            if accounts:
+                for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
+                    # balance = Debit - Credit
+                    balance = closing_balances.get(account.id, 0.0)
+                    
+                    if abs(balance) < 0.01:
+                        continue
+                    
+                    # Liabilities are (Credit > Debit), so balance < 0
+                    # Display as positive
+                    amount = balance * -1 
+                    
+                    group_lines.append({
+                        'level': 1,
+                        'name': f"  {account.name}",
+                        'code': account.code,
+                        'amount': amount,
+                        'is_group': False,
+                    })
+                    
                     group_total += amount
-                else:
-                    group_total -= amount
             
             if group_lines or group_name == 'Capital Account':
                 liab_seq += 10
@@ -493,7 +499,7 @@ class BalanceSheetWizard(models.TransientModel):
                     'sequence': liab_seq,
                     'level': 0,
                     'name': group_name,
-                    'amount': abs(group_total),
+                    'amount': group_total,
                     'is_group': True,
                 })
                 
@@ -516,7 +522,7 @@ class BalanceSheetWizard(models.TransientModel):
                         'amount': abs(net_profit_loss),
                     })
                 
-                total_liabilities += abs(group_total)
+                total_liabilities += group_total
         
         # Process Assets
         total_assets = 0.0
@@ -530,12 +536,14 @@ class BalanceSheetWizard(models.TransientModel):
             group_lines = []
             
             for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
+                # balance = Debit - Credit
                 balance = closing_balances.get(account.id, 0.0)
                 
                 if abs(balance) < 0.01:
                     continue
                 
-                amount = abs(balance)
+                # Assets are (Debit > Credit), so balance > 0
+                amount = balance
                 
                 group_lines.append({
                     'level': 1,
@@ -545,10 +553,7 @@ class BalanceSheetWizard(models.TransientModel):
                     'is_group': False,
                 })
                 
-                if balance > 0:
-                    group_total += amount
-                else:
-                    group_total -= amount
+                group_total += amount
             
             if group_lines:
                 asset_seq += 10
@@ -557,7 +562,7 @@ class BalanceSheetWizard(models.TransientModel):
                     'sequence': asset_seq,
                     'level': 0,
                     'name': group_name,
-                    'amount': abs(group_total),
+                    'amount': group_total,
                     'is_group': True,
                 })
                 
@@ -569,7 +574,7 @@ class BalanceSheetWizard(models.TransientModel):
                     })
                     asset_lines.append(line_vals)
                 
-                total_assets += abs(group_total)
+                total_assets += group_total
         
         # Totals
         liab_seq += 10
@@ -591,6 +596,22 @@ class BalanceSheetWizard(models.TransientModel):
             'amount': total_assets,
             'is_total': True
         })
+        
+        # This is the fix for the unbalanced Total row
+        # Pad the shorter list so the totals align in the view
+        diff = len(liab_lines) - len(asset_lines)
+        if diff > 0:
+            for i in range(diff):
+                asset_seq += 10
+                asset_lines.insert(-1, { # Insert before the total
+                    'wizard_asset_id': self.id, 'sequence': asset_seq, 'name': '', 'level': 2
+                })
+        elif diff < 0:
+            for i in range(abs(diff)):
+                liab_seq += 10
+                liab_lines.insert(-1, { # Insert before the total
+                    'wizard_liab_id': self.id, 'sequence': liab_seq, 'name': '', 'level': 2
+                })
         
         if liab_lines:
             self.env['tally.balance.sheet.line'].create(liab_lines)
@@ -655,10 +676,10 @@ class BalanceSheetWizard(models.TransientModel):
                 worksheet.write(row, 1, line.amount, formats['total'])
             elif line.is_group:
                 worksheet.write(row, 0, line.name, formats['group'])
-                worksheet.write(row, 1, line.amount if line.amount > 0.01 else '', formats['group_number'])
+                worksheet.write(row, 1, line.amount if abs(line.amount) > 0.01 else '', formats['group_number'])
             else:
                 worksheet.write(row, 0, line.name, formats['account'])
-                worksheet.write(row, 1, line.amount if line.amount > 0.01 else '', formats['number'])
+                worksheet.write(row, 1, line.amount if abs(line.amount) > 0.01 else '', formats['number'])
             row += 1
 
         workbook.close()
@@ -707,34 +728,44 @@ class BalanceSheetWizard(models.TransientModel):
         worksheet.write(row, 3, 'Amount', formats['header'])
 
         row = 5
-        max_rows = max(len(self.liability_line_ids), len(self.asset_line_ids))
+        
+        liab_lines = self.liability_line_ids
+        asset_lines = self.asset_line_ids
+        max_rows = max(len(liab_lines), len(asset_lines))
         
         for i in range(max_rows):
-            if i < len(self.liability_line_ids):
-                line = self.liability_line_ids[i]
-                if line.is_total:
-                    worksheet.write(row, 0, line.name, formats['total_text'])
-                    worksheet.write(row, 1, line.amount, formats['total'])
-                elif line.is_group:
-                    worksheet.write(row, 0, line.name, formats['group'])
-                    worksheet.write(row, 1, line.amount if line.amount > 0.01 else '', formats['group_number'])
-                else:
-                    worksheet.write(row, 0, line.name, formats['account'])
-                    worksheet.write(row, 1, line.amount if line.amount > 0.01 else '', formats['number'])
+            wrote_liab = False
+            if i < len(liab_lines):
+                line = liab_lines[i]
+                if line.name or line.is_total:
+                    if line.is_total:
+                        worksheet.write(row, 0, line.name, formats['total_text'])
+                        worksheet.write(row, 1, line.amount, formats['total'])
+                    elif line.is_group:
+                        worksheet.write(row, 0, line.name, formats['group'])
+                        worksheet.write(row, 1, line.amount if abs(line.amount) > 0.01 else '', formats['group_number'])
+                    else:
+                        worksheet.write(row, 0, line.name, formats['account'])
+                        worksheet.write(row, 1, line.amount if abs(line.amount) > 0.01 else '', formats['number'])
+                    wrote_liab = True
             
-            if i < len(self.asset_line_ids):
-                line = self.asset_line_ids[i]
-                if line.is_total:
-                    worksheet.write(row, 2, line.name, formats['total_text'])
-                    worksheet.write(row, 3, line.amount, formats['total'])
-                elif line.is_group:
-                    worksheet.write(row, 2, line.name, formats['group'])
-                    worksheet.write(row, 3, line.amount if line.amount > 0.01 else '', formats['group_number'])
-                else:
-                    worksheet.write(row, 2, line.name, formats['account'])
-                    worksheet.write(row, 3, line.amount if line.amount > 0.01 else '', formats['number'])
-            
-            row += 1
+            wrote_asset = False
+            if i < len(asset_lines):
+                line = asset_lines[i]
+                if line.name or line.is_total:
+                    if line.is_total:
+                        worksheet.write(row, 2, line.name, formats['total_text'])
+                        worksheet.write(row, 3, line.amount, formats['total'])
+                    elif line.is_group:
+                        worksheet.write(row, 2, line.name, formats['group'])
+                        worksheet.write(row, 3, line.amount if abs(line.amount) > 0.01 else '', formats['group_number'])
+                    else:
+                        worksheet.write(row, 2, line.name, formats['account'])
+                        worksheet.write(row, 3, line.amount if abs(line.amount) > 0.01 else '', formats['number'])
+                    wrote_asset = True
+
+            if wrote_liab or wrote_asset:
+                row += 1
 
         workbook.close()
         output.seek(0)

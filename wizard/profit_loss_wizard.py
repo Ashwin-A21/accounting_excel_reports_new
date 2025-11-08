@@ -25,38 +25,42 @@ class ProfitLossWizard(models.TransientModel):
                 raise UserError('End Date must be greater than Start Date!')
 
     def _classify_pl_account_to_tally_group(self, account):
-        """Classify P&L accounts into Tally-style groups"""
-        account_type = account.account_type
+        """Standalone Tally Classification for P&L"""
         name = (account.name or '').lower()
+        acc_type = account.account_type
+
+        # Priority 1: Name-based checks
+        if any(x in name for x in ['sale', 'revenue', 'service']):
+            return 'Sales Accounts'
+        if 'purchase' in name or 'cost of goods' in name or 'cogs' in name:
+            return 'Purchase Accounts'
         
-        # Income Classification
-        if account_type == 'income':
-            if any(x in name for x in ['sale', 'revenue', 'service income']):
-                return 'Sales Accounts'
+        # Check for other direct incomes/expenses by name
+        if 'direct income' in name:
             return 'Direct Incomes'
-        
-        if account_type == 'income_other':
+        if 'direct expense' in name:
+            return 'Direct Expenses'
+            
+        if 'indirect income' in name:
             return 'Indirect Incomes'
-        
-        # Expense Classification
-        if account_type == 'expense_direct_cost':
-            if any(x in name for x in ['purchase', 'cost of goods', 'cogs']):
-                return 'Purchase Accounts'
+        if any(x in name for x in ['salary', 'rent', 'admin', 'utilities', 'depreciation']):
+            return 'Indirect Expenses'
+
+        # Priority 2: Odoo Type fallback
+        if acc_type == 'income':
+            return 'Sales Accounts'
+        if acc_type == 'income_other':
+            return 'Indirect Incomes'
+        if acc_type == 'expense_direct_cost':
             return 'Direct Expenses'
-        
-        if account_type == 'expense':
-            if any(x in name for x in ['salary', 'wage', 'rent', 'utilities']):
-                return 'Direct Expenses'
-            return 'Direct Expenses'
-        
-        if account_type == 'expense_depreciation':
+        if acc_type in ('expense', 'expense_depreciation'):
             return 'Indirect Expenses'
         
         return 'Miscellaneous Expenses'
 
     def _get_period_balances(self, date_from, date_to, company_id):
         """
-        Calculate P&L from core journal items - NET BALANCES
+        Calculate P&L from core journal items - NET BALANCES for the period
         Returns natural amounts (positive values)
         """
         balances = defaultdict(float)
@@ -106,8 +110,10 @@ class ProfitLossWizard(models.TransientModel):
             credit = res['credit'] or 0.0
 
             if account_type in income_types:
+                # Income: Credit - Debit
                 balances[account_id] = credit - debit
             else:
+                # Expense: Debit - Credit
                 balances[account_id] = debit - credit
 
         return balances
@@ -122,7 +128,6 @@ class ProfitLossWizard(models.TransientModel):
         )
         
         if not period_balances:
-            # Create empty report with zero net result
             self.env['tally.profit.loss.line'].create([{
                 'wizard_id': self.id,
                 'sequence': 10,
@@ -143,7 +148,6 @@ class ProfitLossWizard(models.TransientModel):
             group_name = self._classify_pl_account_to_tally_group(account)
             accounts_by_group[group_name] |= account
         
-        # Tally P&L Group Order (Expenses on left, Income on right in traditional format)
         expense_groups = [
             'Purchase Accounts',
             'Direct Expenses',
@@ -163,53 +167,6 @@ class ProfitLossWizard(models.TransientModel):
         total_expenses = 0.0
         total_income = 0.0
         
-        # Process Expense Groups
-        for group_name in expense_groups:
-            accounts = accounts_by_group.get(group_name)
-            if not accounts:
-                continue
-            
-            group_total = 0.0
-            group_lines = []
-            
-            for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
-                balance = period_balances.get(account.id, 0.0)
-                
-                if abs(balance) < 0.01:
-                    continue
-                
-                group_lines.append({
-                    'level': 1,
-                    'name': f"  {account.name}",
-                    'code': account.code,
-                    'amount': abs(balance),
-                    'is_group': False,
-                    'is_total': False,
-                })
-                
-                group_total += abs(balance)
-            
-            if group_lines:
-                sequence += 10
-                lines.append({
-                    'wizard_id': self.id,
-                    'sequence': sequence,
-                    'level': 0,
-                    'name': group_name,
-                    'amount': group_total,
-                    'is_group': True,
-                })
-                
-                for line_vals in group_lines:
-                    sequence += 10
-                    line_vals.update({
-                        'wizard_id': self.id,
-                        'sequence': sequence
-                    })
-                    lines.append(line_vals)
-                
-                total_expenses += group_total
-        
         # Process Income Groups
         for group_name in income_groups:
             accounts = accounts_by_group.get(group_name)
@@ -220,6 +177,7 @@ class ProfitLossWizard(models.TransientModel):
             group_lines = []
             
             for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
+                # balance is (credit - debit)
                 balance = period_balances.get(account.id, 0.0)
                 
                 if abs(balance) < 0.01:
@@ -229,12 +187,12 @@ class ProfitLossWizard(models.TransientModel):
                     'level': 1,
                     'name': f"  {account.name}",
                     'code': account.code,
-                    'amount': abs(balance),
+                    'amount': balance, # Keep positive
                     'is_group': False,
                     'is_total': False,
                 })
                 
-                group_total += abs(balance)
+                group_total += balance
             
             if group_lines:
                 sequence += 10
@@ -257,6 +215,54 @@ class ProfitLossWizard(models.TransientModel):
                 
                 total_income += group_total
         
+        # Process Expense Groups
+        for group_name in expense_groups:
+            accounts = accounts_by_group.get(group_name)
+            if not accounts:
+                continue
+            
+            group_total = 0.0
+            group_lines = []
+            
+            for account in sorted(accounts, key=lambda a: (a.code or '', a.name)):
+                # balance is (debit - credit)
+                balance = period_balances.get(account.id, 0.0)
+                
+                if abs(balance) < 0.01:
+                    continue
+                
+                group_lines.append({
+                    'level': 1,
+                    'name': f"  {account.name}",
+                    'code': account.code,
+                    'amount': balance, # Keep positive
+                    'is_group': False,
+                    'is_total': False,
+                })
+                
+                group_total += balance
+            
+            if group_lines:
+                sequence += 10
+                lines.append({
+                    'wizard_id': self.id,
+                    'sequence': sequence,
+                    'level': 0,
+                    'name': group_name,
+                    'amount': group_total,
+                    'is_group': True,
+                })
+                
+                for line_vals in group_lines:
+                    sequence += 10
+                    line_vals.update({
+                        'wizard_id': self.id,
+                        'sequence': sequence
+                    })
+                    lines.append(line_vals)
+                
+                total_expenses += group_total
+
         # Net Profit/Loss
         net_result = total_income - total_expenses
         
@@ -348,16 +354,20 @@ class ProfitLossWizard(models.TransientModel):
 
         row = 5
         for line in self.line_ids:
+            # We now display amounts as they are (Income positive, Expense positive)
+            # Net Profit/Loss logic handles the final sign
+            amount_to_display = line.amount
+            
             if line.is_net_result:
                 fmt = formats['profit'] if 'Profit' in line.name else formats['loss']
                 worksheet.write(row, 0, line.name, fmt)
-                worksheet.write(row, 1, line.amount, fmt)
+                worksheet.write(row, 1, amount_to_display, fmt)
             elif line.is_group:
                 worksheet.write(row, 0, line.name, formats['group'])
-                worksheet.write(row, 1, line.amount if line.amount else '', formats['group_number'])
+                worksheet.write(row, 1, amount_to_display if amount_to_display else '', formats['group_number'])
             else:
                 worksheet.write(row, 0, line.name, formats['account'])
-                worksheet.write(row, 1, line.amount if line.amount > 0.01 else '', formats['number'])
+                worksheet.write(row, 1, amount_to_display if abs(amount_to_display) > 0.01 else '', formats['number'])
             row += 1
 
         workbook.close()
